@@ -1,0 +1,36 @@
+[package]
+name = "block_explorer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Bitcoin
+bitcoin = { version = "0.32.5", features = ["serde"] }
+bitcoincore-rpc = "0.19.0"
+
+# Async runtime
+tokio = { version = "1.44.2", features = ["full"] }
+
+# Web framework
+axum = "0.8.4"
+
+# Database
+sqlx = { version = "0.8.3", features = ["runtime-tokio", "postgres", "macros"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Configuration
+dotenvy = "0.15.7"
+
+# Error handling
+thiserror = "2.0.12"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Hex encoding/decoding
+hex = "0.4"
