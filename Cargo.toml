@@ -34,3 +34,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Hex encoding/decoding
 hex = "0.4"
+
+# Terminal colors and formatting
+colored = "2.1"
+
+# ZMQ — receives new block notifications from Bitcoin Core
+bitcoincore-zmq = { version = "1.5.4", features = ["async"] }
+
+# Stream utilities for ZMQ async stream
+futures-util = "0.3"
+
+# Terminal UI
+ratatui = "0.29"
+crossterm = "0.28"

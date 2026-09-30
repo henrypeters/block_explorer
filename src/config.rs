@@ -18,6 +18,9 @@ pub struct Config {
 
     /// Bitcoin network: "regtest", "testnet", or "mainnet"
     pub network: String,
+
+    /// ZMQ address for new block notifications e.g. tcp://127.0.0.1:28334
+    pub zmq_block_url: String,
 }
 
 impl Config {
@@ -30,6 +33,8 @@ impl Config {
             rpc_password: require_env("RPC_PASSWORD"),
             database_url: require_env("DATABASE_URL"),
             network: env::var("BITCOIN_NETWORK").unwrap_or_else(|_| "regtest".to_string()),
+            zmq_block_url: env::var("ZMQ_BLOCK_URL")
+                .unwrap_or_else(|_| "tcp://127.0.0.1:28334".to_string()),
         }
     }
 }

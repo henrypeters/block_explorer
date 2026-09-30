@@ -1,1 +1,3 @@
-// Database module — will be populated in Phase 2
+pub mod blocks;
+pub mod outputs;
+pub mod state;

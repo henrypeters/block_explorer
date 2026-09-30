@@ -1,1 +1,3 @@
-// Indexer module — will be populated in Phase 2
+pub mod runner;
+pub mod zmq;
+pub mod display;

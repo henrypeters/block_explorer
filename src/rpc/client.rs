@@ -44,4 +44,12 @@ impl RpcClient {
     ) -> Result<bitcoincore_rpc::json::GetBlockchainInfoResult, ExplorerError> {
         Ok(self.inner.get_blockchain_info()?)
     }
+
+    /// Returns block header info including height, given a block hash.
+    pub fn get_block_info(
+        &self,
+        hash: &bitcoin::BlockHash,
+    ) -> Result<bitcoincore_rpc::json::GetBlockHeaderResult, ExplorerError> {
+        Ok(self.inner.get_block_header_info(hash)?)
+    }
 }
