@@ -5,6 +5,8 @@ pub enum Mode {
     Normal,
     /// Typing in the search box
     Searching,
+    /// Selecting a field to copy
+    Copying,
 }
 
 /// The result of a search query
@@ -98,6 +100,36 @@ pub struct App {
 
     /// Whether the app should quit
     pub should_quit: bool,
+
+    /// List of copyable fields from the current result
+    pub copy_fields: Vec<(String, String)>,
+
+    /// Currently selected copy field index
+    pub copy_selected: usize,
+
+    /// Animation tick counter — incremented every frame
+    pub tick: u64,
+
+    /// Whether the background sync is still running
+    pub syncing: bool,
+
+    /// Whether a search query is currently running
+    pub searching: bool,
+
+    /// Height of the most recently arrived new block (for flash animation)
+    pub new_block_flash: Option<(i32, u64)>, // (height, tick_when_arrived)
+
+    /// Intro animation state — how many blocks to show (None = intro done)
+    pub intro_reveal: Option<usize>,
+
+    /// Instant when the last intro frame was shown
+    pub intro_last_tick: std::time::Instant,
+
+    /// Horizontal slide-in offset for the newest block (starts at -40 or +40, moves to 0)
+    pub intro_anim_offset: i16,
+
+    /// Whether the current slide is from the right (true) or left (false)
+    pub intro_anim_from_right: bool,
 }
 
 impl App {
@@ -111,6 +143,67 @@ impl App {
             block_scroll: 0,
             status: "Click the search box or press / to search.".to_string(),
             should_quit: false,
+            copy_fields: Vec::new(),
+            copy_selected: 0,
+            tick: 0,
+            syncing: true,
+            searching: false,
+            new_block_flash: None,
+            intro_reveal: Some(0),
+            intro_last_tick: std::time::Instant::now(),
+            intro_anim_offset: 0,
+            intro_anim_from_right: true, // first block slides in from right
+        }
+    }
+
+    /// Called every frame to advance animations
+    pub fn tick(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
+
+        // Advance slide-in offset toward 0 (4 chars per frame)
+        if self.intro_anim_offset < 0 {
+            self.intro_anim_offset = (self.intro_anim_offset + 4).min(0);
+        } else if self.intro_anim_offset > 0 {
+            self.intro_anim_offset = (self.intro_anim_offset - 4).max(0);
+        }
+
+        // Advance intro animation — reveal one more block every 0.5s
+        if let Some(revealed) = self.intro_reveal {
+            if self.intro_last_tick.elapsed() >= std::time::Duration::from_millis(500) {
+                let total = self.blocks.len();
+                if revealed >= total {
+                    self.intro_reveal = None;
+                    self.intro_anim_offset = 0;
+                } else {
+                    self.intro_reveal = Some(revealed + 1);
+                    // Alternate direction: odd reveals from right, even from left
+                    self.intro_anim_from_right = (revealed % 2) == 0;
+                    self.intro_anim_offset = if self.intro_anim_from_right { 40 } else { -40 };
+                }
+                self.intro_last_tick = std::time::Instant::now();
+            }
+        }
+    }
+
+    /// Trigger a slide-in animation for a newly mined block.
+    /// Alternates direction based on the block height (even=right, odd=left).
+    pub fn trigger_new_block_slide(&mut self, height: i32) {
+        self.intro_anim_from_right = (height % 2) == 0;
+        self.intro_anim_offset = if self.intro_anim_from_right { 40 } else { -40 };
+    }
+
+    /// Returns the current spinner frame character
+    pub fn spinner_frame(&self) -> &'static str {
+        const FRAMES: &[&str] = &["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+        FRAMES[(self.tick / 3) as usize % FRAMES.len()]
+    }
+
+    /// Returns true if the new block flash is still active for a given height
+    pub fn is_flashing(&self, height: i32) -> bool {
+        if let Some((h, arrived_tick)) = self.new_block_flash {
+            h == height && self.tick.saturating_sub(arrived_tick) < 20
+        } else {
+            false
         }
     }
 
@@ -122,6 +215,40 @@ impl App {
     pub fn exit_search_mode(&mut self) {
         self.mode = Mode::Normal;
         self.status = "Press / to search. Press q to quit.".to_string();
+    }
+
+    pub fn enter_copy_mode(&mut self) {
+        // Build list of copyable fields from current result
+        self.copy_fields = match &self.result {
+            Some(SearchResult::Block(b)) => vec![
+                ("Block Hash".to_string(),  b.hash.clone()),
+                ("Prev Hash".to_string(),   b.prev_hash.clone()),
+                ("Height".to_string(),      b.height.to_string()),
+            ],
+            Some(SearchResult::Transaction(t)) => vec![
+                ("TXID".to_string(),        t.txid.clone()),
+                ("Block Height".to_string(), t.block_height.to_string()),
+            ],
+            Some(SearchResult::Address(a)) => vec![
+                ("Address".to_string(),     a.address.clone()),
+                ("Balance".to_string(),     format!("{}", a.balance_sats)),
+            ],
+            _ => return,
+        };
+
+        if self.copy_fields.is_empty() {
+            return;
+        }
+
+        self.copy_selected = 0;
+        self.mode = Mode::Copying;
+        self.status = "Select a field to copy. [↑↓] Navigate  [Enter] Copy  [Esc] Cancel".to_string();
+    }
+
+    pub fn exit_copy_mode(&mut self) {
+        self.mode = Mode::Normal;
+        self.copy_fields.clear();
+        self.status = "Press / to search. [c] Copy a field. Press q to quit.".to_string();
     }
 
     pub fn clear(&mut self) {
@@ -143,7 +270,10 @@ impl App {
         if self.result.is_some() {
             self.scroll = self.scroll.saturating_add(1);
         } else {
-            self.block_scroll = self.block_scroll.saturating_add(1);
+            // Cap scroll so we can't go past the last block card
+            // Each card is 6 lines (5 + 1 gap)
+            let max_scroll = (self.blocks.len() as u16).saturating_sub(1) * 6;
+            self.block_scroll = (self.block_scroll + 1).min(max_scroll);
         }
     }
 }

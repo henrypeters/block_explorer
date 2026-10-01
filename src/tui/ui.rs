@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 
 use crate::tui::app::{App, Mode, SearchResult};
@@ -14,41 +14,65 @@ pub fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // header
+            Constraint::Length(4), // header
             Constraint::Length(3), // search box
+            Constraint::Length(1), // spacer
             Constraint::Min(0),    // block list OR results
             Constraint::Length(1), // status bar
         ])
         .split(area);
 
-    render_header(frame, chunks[0]);
+    render_header(frame, app, chunks[0]);
     render_search(frame, app, chunks[1]);
-
+    // chunks[2] is the spacer — nothing rendered there
     if app.result.is_some() {
-        render_results(frame, app, chunks[2]);
+        render_results(frame, app, chunks[3]);
     } else {
-        render_block_list(frame, app, chunks[2]);
+        render_block_list(frame, app, chunks[3]);
     }
 
-    render_status(frame, app, chunks[3]);
+    render_status(frame, app, chunks[4]);
+
+    // Copy mode overlay — rendered on top of everything
+    if app.mode == Mode::Copying {
+        render_copy_overlay(frame, app, area);
+    }
 }
 
 // ─── Header ──────────────────────────────────────────────────────────────────
 
-fn render_header(frame: &mut Frame, area: Rect) {
-    let title = Paragraph::new("  ₿  Bitcoin Block Explorer  —  regtest")
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .alignment(Alignment::Left);
-    frame.render_widget(title, area);
+fn render_header(frame: &mut Frame, app: &App, area: Rect) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(20)])
+        .split(area);
+
+    let title = Paragraph::new(Text::from(vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  _StrataBTC_",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ]))
+    .alignment(Alignment::Left);
+    frame.render_widget(title, cols[0]);
+
+    let badge = Paragraph::new(Text::from(vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                " REGTEST ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ]))
+    .alignment(Alignment::Right);
+    frame.render_widget(badge, cols[1]);
 }
 
 // ─── Search box ──────────────────────────────────────────────────────────────
@@ -60,23 +84,41 @@ fn render_search(frame: &mut Frame, app: &App, area: Rect) {
         Color::DarkGray
     };
 
-    let hint = if app.mode == Mode::Searching {
-        " [Enter] Search  [Esc] Cancel "
+    // What to show inside the box
+    let (content, content_style, alignment) = if app.searching {
+        (
+            format!("{} Searching...", app.spinner_frame()),
+            Style::default().fg(Color::Yellow),
+            Alignment::Left,
+        )
+    } else if app.search_input.is_empty() && app.mode != Mode::Searching {
+        // Placeholder — centered, dark color
+        (
+            "block height / hash / txid / address".to_string(),
+            Style::default().fg(Color::DarkGray),
+            Alignment::Center,
+        )
     } else {
-        " Click here or press / to search "
+        (
+            app.search_input.clone(),
+            Style::default().fg(Color::White),
+            Alignment::Left,
+        )
     };
 
-    let input = Paragraph::new(app.search_input.as_str())
-        .style(Style::default().fg(Color::White))
+    let input = Paragraph::new(content.as_str())
+        .style(content_style)
+        .alignment(alignment)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color))
-                .title(format!(" 🔍 Search: block height / hash / txid / address  {hint}")),
+                .title(" Search "),
         );
     frame.render_widget(input, area);
 
-    if app.mode == Mode::Searching {
+    // Show cursor only when actively typing
+    if app.mode == Mode::Searching && !app.searching {
         frame.set_cursor_position((
             area.x + app.search_input.len() as u16 + 1,
             area.y + 1,
@@ -100,17 +142,105 @@ fn render_block_list(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let mut lines: Vec<Line> = vec![];
+    // Render the outer border first
+    frame.render_widget(outer, area);
 
-    for block in &app.blocks {
-        let top_border = format!("  ╔{:═<68}╗", "");
-        let bot_border = format!("  ╚{:═<68}╝", "");
+    // Card width — fixed at 96 chars
+    const CARD_WIDTH: u16 = 96;
 
-        lines.push(Line::from(
-            Span::styled(top_border, Style::default().fg(Color::DarkGray))
-        ));
-        lines.push(Line::from(vec![
-            Span::styled("  ║  ".to_string(), Style::default().fg(Color::DarkGray)),
+    // Center the card container within the inner area
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    // Centered x position for cards
+    let card_x = inner.x + inner.width.saturating_sub(CARD_WIDTH) / 2;
+
+    // During intro: reveal oldest→newest
+    // After intro: show all newest→oldest
+    let blocks_to_show: Vec<&crate::tui::app::BlockRow> = match app.intro_reveal {
+        Some(revealed) => {
+            let total = app.blocks.len();
+            let skip = total.saturating_sub(revealed);
+            app.blocks.iter().skip(skip).collect()
+        }
+        None => app.blocks.iter().collect(),
+    };
+
+    // Each card is 5 lines + 1 gap = 6 lines per block
+    const CARD_HEIGHT: u16 = 5;
+    const CARD_GAP: u16 = 1;
+
+    for (i, block) in blocks_to_show.iter().enumerate() {
+        let card_top = inner.y as i32 + (i as i32) * (CARD_HEIGHT as i32 + CARD_GAP as i32);
+
+        // Apply scroll offset
+        let scrolled_top = card_top - app.block_scroll as i32;
+
+        // Skip cards fully above the visible area
+        if scrolled_top + CARD_HEIGHT as i32 <= inner.y as i32 {
+            continue;
+        }
+        // Stop rendering cards fully below the visible area
+        if scrolled_top >= (inner.y + inner.height) as i32 {
+            break;
+        }
+
+        // Card must be within valid screen bounds
+        if scrolled_top < 0 {
+            continue;
+        }
+
+        let offset = if i == 0 { app.intro_anim_offset } else { 0 };
+
+        let slide_x = (card_x as i32 + offset as i32)
+            .max(inner.x as i32)
+            .min((inner.x + inner.width) as i32) as u16;
+
+        // Clip card height to not exceed the inner area bottom
+        let max_y = inner.y + inner.height;
+        let actual_y = scrolled_top as u16;
+        let available_height = max_y.saturating_sub(actual_y).min(CARD_HEIGHT);
+
+        if available_height == 0 {
+            break;
+        }
+
+        let card_rect = Rect {
+            x: slide_x,
+            y: actual_y,
+            width: CARD_WIDTH.min(inner.width),
+            height: available_height,
+        };
+
+        render_block_card(frame, block, card_rect);
+    }
+}
+
+/// Renders a single block card into the given rect.
+fn render_block_card(frame: &mut Frame, block: &crate::tui::app::BlockRow, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    // Hard guard: never render outside the terminal buffer
+    let terminal_area = frame.area();
+    if area.x >= terminal_area.width || area.y >= terminal_area.height {
+        return;
+    }
+
+    let w = area.width as usize;
+    let inner_w = w.saturating_sub(6); // account for ║  and  ║
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("╔{:═<width$}╗", "", width = w.saturating_sub(2)),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(vec![
+            Span::styled("║  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!("BLOCK #{}", block.height),
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -118,58 +248,39 @@ fn render_block_list(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 format!(
                     "  —  {} tx  —  {} bytes{:>width$}  ║",
-                    block.tx_count,
-                    block.size,
-                    "",
-                    width = 64usize.saturating_sub(
+                    block.tx_count, block.size, "",
+                    width = inner_w.saturating_sub(
                         format!("BLOCK #{}  —  {} tx  —  {} bytes", block.height, block.tx_count, block.size).len()
                     )
                 ),
                 Style::default().fg(Color::DarkGray),
             ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  ║  ".to_string(), Style::default().fg(Color::DarkGray)),
-            Span::styled("Hash:  ".to_string(), Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled("║  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Hash:  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("{:<58}", truncate(&block.hash, 58)),
+                format!("{:<width$}", truncate(&block.hash, inner_w.saturating_sub(7)), width = inner_w.saturating_sub(7)),
                 Style::default().fg(Color::White),
             ),
-            Span::styled("  ║".to_string(), Style::default().fg(Color::DarkGray)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  ║  ".to_string(), Style::default().fg(Color::DarkGray)),
-            Span::styled("Time:  ".to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled("  ║", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled("║  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Time:  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("{:<58}", block.timestamp),
+                format!("{:<width$}", block.timestamp, width = inner_w.saturating_sub(7)),
                 Style::default().fg(Color::Cyan),
             ),
-            Span::styled("  ║".to_string(), Style::default().fg(Color::DarkGray)),
-        ]));
-        lines.push(Line::from(
-            Span::styled(bot_border, Style::default().fg(Color::DarkGray))
-        ));
-        // Gap between cards
-        lines.push(Line::from(""));
-    }
+            Span::styled("  ║", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(Span::styled(
+            format!("╚{:═<width$}╝", "", width = w.saturating_sub(2)),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
 
-    let total_lines = lines.len() as u16;
-    let inner_height = area.height.saturating_sub(2);
-
-    let para = Paragraph::new(Text::from(lines))
-        .block(outer)
-        .scroll((app.block_scroll, 0));
-    frame.render_widget(para, area);
-
-    if total_lines > inner_height {
-        let mut state = ScrollbarState::new(total_lines as usize)
-            .position(app.block_scroll as usize);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            area,
-            &mut state,
-        );
-    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 // ─── Results panel ───────────────────────────────────────────────────────────
@@ -189,17 +300,74 @@ fn render_results(frame: &mut Frame, app: &App, area: Rect) {
         }
 
         Some(SearchResult::NotFound(msg)) => {
-            let text = Paragraph::new(format!("\n  Not found: {msg}"))
-                .style(Style::default().fg(Color::Red))
-                .block(block_widget);
-            frame.render_widget(text, area);
+            let lines = vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(
+                        "  ✖  NOT FOUND",
+                        Style::default()
+                            .fg(Color::Red)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(msg.clone(), Style::default().fg(Color::White)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Make sure you entered one of:",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "    • A block height         e.g.  5",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "    • A block hash (64 hex)  e.g.  0f9188f13cb7...",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "    • A transaction ID       e.g.  4a5e1e4baab8...",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "    • A bitcoin address      e.g.  bcrt1q...",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Press Esc to go back to the block list.",
+                    Style::default().fg(Color::Yellow),
+                )),
+            ];
+            render_scrollable(frame, area, block_widget, lines, 0);
         }
 
         Some(SearchResult::Error(msg)) => {
-            let text = Paragraph::new(format!("\n  Error: {msg}"))
-                .style(Style::default().fg(Color::Red))
-                .block(block_widget);
-            frame.render_widget(text, area);
+            let lines = vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(
+                        "  ✖  ERROR",
+                        Style::default()
+                            .fg(Color::Red)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(msg.clone(), Style::default().fg(Color::White)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Press Esc to go back to the block list.",
+                    Style::default().fg(Color::Yellow),
+                )),
+            ];
+            render_scrollable(frame, area, block_widget, lines, 0);
         }
 
         Some(SearchResult::Block(b)) => {
@@ -242,20 +410,83 @@ fn render_scrollable(
     }
 }
 
+// ─── Copy overlay ─────────────────────────────────────────────────────────────
+
+fn render_copy_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    // Centre a small popup
+    let popup_width = 60u16.min(area.width.saturating_sub(4));
+    let popup_height = (app.copy_fields.len() as u16 + 4).min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    // Clear the area behind the popup
+    frame.render_widget(Clear, popup_area);
+
+    let items: Vec<ListItem> = app
+        .copy_fields
+        .iter()
+        .map(|(label, value)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{label}: "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    truncate(value, (popup_width as usize).saturating_sub(label.len() + 4)),
+                    Style::default().fg(Color::White),
+                ),
+            ]))
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(app.copy_selected));
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Select field to copy — [↑↓] Navigate  [Enter] Copy  [Esc] Cancel "),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    frame.render_stateful_widget(list, popup_area, &mut list_state);
+}
+
 // ─── Status bar ──────────────────────────────────────────────────────────────
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let keys = if app.mode == Mode::Searching {
         ""
-    } else if app.result.is_some() {
-        "  [↑↓] Scroll   [Esc] Back to blocks   [q] Quit"
+    } else if app.mode == Mode::Copying {
+        ""
     } else {
-        "  [↑↓] Scroll   [q] Quit"
+        match &app.result {
+            Some(SearchResult::NotFound(_)) | Some(SearchResult::Error(_)) => {
+                "  [Esc] Back to blocks   [/] New search   [q] Quit"
+            }
+            Some(_) => "  [↑↓] Scroll   [c] Copy   [Esc] Back to blocks   [q] Quit",
+            None => "  [↑↓] Scroll   [q] Quit",
+        }
     };
 
     let line = Line::from(vec![
         Span::styled(&app.status, Style::default().fg(Color::DarkGray)),
-        Span::styled(keys, Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+        Span::styled(
+            keys,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
     ]);
 
     frame.render_widget(Paragraph::new(line), area);

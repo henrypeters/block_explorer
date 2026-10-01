@@ -63,7 +63,32 @@ pub async fn run(pool: &PgPool, rpc: &RpcClient, network: Network) {
     );
 }
 
-/// Re-fetches all indexed blocks from Bitcoin Core and prints them.
+/// Silent version of run — used when TUI is active.
+/// Indexes blocks without printing anything to stdout.
+pub async fn run_silent(pool: &PgPool, rpc: &RpcClient, network: Network) {
+    let last_height = match get_last_indexed_height(pool).await {
+        Ok(h) => h,
+        Err(e) => { error!("Failed to read indexer state: {e}"); return; }
+    };
+
+    let start_height = (last_height + 1) as u64;
+
+    let chain_tip = match rpc.get_block_count() {
+        Ok(h) => h,
+        Err(e) => { error!("Failed to get block count: {e}"); return; }
+    };
+
+    if start_height > chain_tip {
+        return;
+    }
+
+    for height in start_height..=chain_tip {
+        if let Err(e) = fetch_and_index(pool, rpc, height, network).await {
+            error!("Failed to index block {height}: {e}");
+            return;
+        }
+    }
+}
 async fn print_all_indexed_blocks(pool: &PgPool, rpc: &RpcClient, network: Network) {
     let rows = match sqlx::query!("SELECT height FROM blocks ORDER BY height ASC")
         .fetch_all(pool)
@@ -99,8 +124,6 @@ pub async fn fetch_and_index(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let hash = rpc.get_block_hash(height)?;
     let block = rpc.get_block(&hash)?;
-
-    print_block(&block, height, network);
 
     insert_block(pool, &block, height as i32, network).await?;
     set_last_indexed_height(pool, height as i32).await?;

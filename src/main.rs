@@ -7,12 +7,13 @@ mod api;
 mod tui;
 
 use bitcoin::Network;
-use colored::Colorize;
 use dotenvy::dotenv;
 use sqlx::postgres::PgPoolOptions;
+use std::sync::{Arc, Mutex};
 
 use config::Config;
 use rpc::client::RpcClient;
+use tui::SharedState;
 
 #[tokio::main]
 async fn main() {
@@ -27,53 +28,43 @@ async fn main() {
         _ => Network::Regtest,
     };
 
-    // --- Connect to Bitcoin Core ---
-    println!("{}", "─".repeat(72).dimmed());
-    println!(
-        "  {} Connecting to Bitcoin Core at {}",
-        "⟳".cyan(),
-        config.rpc_url.yellow()
-    );
-
+    // Connect to Bitcoin Core
     let rpc = RpcClient::new(&config).expect("Failed to connect to Bitcoin Core RPC");
+    rpc.get_blockchain_info().expect("Failed to connect to Bitcoin Core");
 
-    let chain_info = rpc
-        .get_blockchain_info()
-        .expect("Failed to get blockchain info");
-
-    println!(
-        "  {} Connected — chain: {}  height: {}",
-        "✔".green().bold(),
-        chain_info.chain.to_string().yellow(),
-        chain_info.blocks.to_string().yellow()
-    );
-
-    // --- Connect to PostgreSQL ---
-    println!("  {} Connecting to PostgreSQL...", "⟳".cyan());
-
+    // Connect to PostgreSQL
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(&config.database_url)
         .await
         .expect("Failed to connect to PostgreSQL");
 
-    println!("  {} Connected to PostgreSQL", "✔".green().bold());
-    println!("{}\n", "─".repeat(72).dimmed());
+    // Shared state between background tasks and TUI
+    let shared = Arc::new(Mutex::new(SharedState {
+        syncing: true,
+        latest_block_height: None,
+    }));
 
-    // --- Spawn the initial sync in the background ---
+    // --- Spawn initial sync ---
     let pool_sync = pool.clone();
     let rpc_sync = RpcClient::new(&config).expect("Failed to create sync RPC client");
+    let shared_sync = shared.clone();
     tokio::spawn(async move {
-        indexer::runner::run(&pool_sync, &rpc_sync, network).await;
+        indexer::runner::run_silent(&pool_sync, &rpc_sync, network).await;
+        // Mark sync complete
+        if let Ok(mut state) = shared_sync.lock() {
+            state.syncing = false;
+        }
     });
 
-    // --- Spawn the poller in the background ---
+    // --- Spawn poller ---
     let pool_poll = pool.clone();
     let rpc_poll = RpcClient::new(&config).expect("Failed to create poller RPC client");
+    let shared_poll = shared.clone();
     tokio::spawn(async move {
-        indexer::zmq::listen(&pool_poll, &rpc_poll, network).await;
+        indexer::zmq::listen_with_shared(&pool_poll, &rpc_poll, network, shared_poll).await;
     });
 
-    // --- Launch the TUI immediately ---
-    tui::run(&pool).await.expect("TUI error");
+    // --- Launch TUI ---
+    tui::run(&pool, shared).await.expect("TUI error");
 }
