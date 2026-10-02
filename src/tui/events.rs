@@ -44,6 +44,14 @@ fn handle_normal(app: &mut App, key: KeyCode) {
                 app.enter_copy_mode();
             }
         }
+        KeyCode::Char('m') => {
+            app.screen = crate::tui::app::Screen::Mempool;
+            app.status = "Mempool  |  [b] Back to blocks   [↑↓] Scroll   [q] Quit".to_string();
+        }
+        KeyCode::Char('b') => {
+            app.screen = crate::tui::app::Screen::Blocks;
+            app.status = "Click the search box or press / to search.".to_string();
+        }
         KeyCode::Esc => app.clear(),
         KeyCode::Up => app.scroll_up(),
         KeyCode::Down => app.scroll_down(),
@@ -124,16 +132,18 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             if mouse.row >= SEARCH_BOX_TOP && mouse.row <= SEARCH_BOX_BOTTOM {
-                // Click inside search box → activate
                 if app.mode != Mode::Searching {
                     app.enter_search_mode();
                 }
             } else {
-                // Click outside search box → deactivate
                 if app.mode == Mode::Searching {
                     app.exit_search_mode();
                 }
             }
+        }
+        MouseEventKind::Moved => {
+            app.mouse_x = mouse.column;
+            app.mouse_y = mouse.row;
         }
         MouseEventKind::ScrollUp => app.scroll_up(),
         MouseEventKind::ScrollDown => app.scroll_down(),

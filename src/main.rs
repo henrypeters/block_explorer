@@ -18,7 +18,13 @@ use tui::SharedState;
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-    tracing_subscriber::fmt::init();
+
+    // Disable all log output — the TUI owns the terminal completely.
+    // Any output to stdout or stderr will corrupt the TUI display.
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
+        .with_writer(std::io::sink)
+        .init();
 
     let config = Config::from_env();
 
@@ -43,6 +49,8 @@ async fn main() {
     let shared = Arc::new(Mutex::new(SharedState {
         syncing: true,
         latest_block_height: None,
+        new_mempool_txs: Vec::new(),
+        all_mempool_txs: Vec::new(),
     }));
 
     // --- Spawn initial sync ---
@@ -51,18 +59,24 @@ async fn main() {
     let shared_sync = shared.clone();
     tokio::spawn(async move {
         indexer::runner::run_silent(&pool_sync, &rpc_sync, network).await;
-        // Mark sync complete
         if let Ok(mut state) = shared_sync.lock() {
             state.syncing = false;
         }
     });
 
-    // --- Spawn poller ---
+    // --- Spawn block poller ---
     let pool_poll = pool.clone();
     let rpc_poll = RpcClient::new(&config).expect("Failed to create poller RPC client");
     let shared_poll = shared.clone();
     tokio::spawn(async move {
         indexer::zmq::listen_with_shared(&pool_poll, &rpc_poll, network, shared_poll).await;
+    });
+
+    // --- Spawn mempool poller ---
+    let rpc_mempool = RpcClient::new(&config).expect("Failed to create mempool RPC client");
+    let shared_mempool = shared.clone();
+    tokio::spawn(async move {
+        indexer::mempool::poll(&rpc_mempool, shared_mempool).await;
     });
 
     // --- Launch TUI ---

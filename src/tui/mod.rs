@@ -23,6 +23,8 @@ use crate::tui::ui::render;
 pub struct SharedState {
     pub syncing: bool,
     pub latest_block_height: Option<i32>,
+    pub new_mempool_txs: Vec<crate::tui::app::MempoolTx>,
+    pub all_mempool_txs: Vec<crate::tui::app::MempoolTx>,
 }
 
 pub async fn run(pool: &PgPool, shared: Arc<Mutex<SharedState>>) -> io::Result<()> {
@@ -32,6 +34,7 @@ pub async fn run(pool: &PgPool, shared: Arc<Mutex<SharedState>>) -> io::Result<(
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
+        crossterm::event::EnableMouseCapture,
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
     )?;
     let backend = CrosstermBackend::new(stdout);
@@ -51,7 +54,7 @@ pub async fn run(pool: &PgPool, shared: Arc<Mutex<SharedState>>) -> io::Result<(
         app.tick();
 
         // Sync shared state into app
-        if let Ok(state) = shared.lock() {
+        if let Ok(mut state) = shared.lock() {
             app.syncing = state.syncing;
 
             // Detect new block arrival for slide animation
@@ -59,11 +62,21 @@ pub async fn run(pool: &PgPool, shared: Arc<Mutex<SharedState>>) -> io::Result<(
                 if last_known_height.map_or(true, |h| new_height > h) {
                     app.trigger_new_block_slide(new_height);
                     last_known_height = Some(new_height);
-                    // Refresh block list immediately
                     app.blocks = load_recent_blocks(pool).await;
                     last_block_refresh = Instant::now();
                 }
             }
+
+            // Pull in new mempool transactions
+            if !state.new_mempool_txs.is_empty() {
+                if let Some(tx) = state.new_mempool_txs.last().cloned() {
+                    app.mempool_notification = Some((tx, app.frame_count));
+                }
+                state.new_mempool_txs.clear();
+            }
+
+            // Update full mempool list
+            app.mempool_txs = state.all_mempool_txs.clone();
         }
 
         // Refresh block list every 5 seconds

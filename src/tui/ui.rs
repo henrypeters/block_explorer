@@ -24,11 +24,25 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     render_header(frame, app, chunks[0]);
     render_search(frame, app, chunks[1]);
-    // chunks[2] is the spacer — nothing rendered there
-    if app.result.is_some() {
-        render_results(frame, app, chunks[3]);
-    } else {
-        render_block_list(frame, app, chunks[3]);
+
+    match app.screen {
+        crate::tui::app::Screen::Blocks => {
+            if app.result.is_some() {
+                render_results(frame, app, chunks[3]);
+            } else {
+                render_block_list(frame, app, chunks[3]);
+            }
+        }
+        crate::tui::app::Screen::Mempool => {
+            render_mempool(frame, app, chunks[3]);
+        }
+    }
+
+    // Mempool notification overlay on block screen
+    if app.screen == crate::tui::app::Screen::Blocks {
+        if let Some((tx, _)) = &app.mempool_notification {
+            render_mempool_notification(frame, tx, chunks[3]);
+        }
     }
 
     render_status(frame, app, chunks[4]);
@@ -145,9 +159,6 @@ fn render_block_list(frame: &mut Frame, app: &App, area: Rect) {
     // Render the outer border first
     frame.render_widget(outer, area);
 
-    // Card width — fixed at 96 chars
-    const CARD_WIDTH: u16 = 96;
-
     // Center the card container within the inner area
     let inner = Rect {
         x: area.x + 1,
@@ -156,8 +167,11 @@ fn render_block_list(frame: &mut Frame, app: &App, area: Rect) {
         height: area.height.saturating_sub(2),
     };
 
+    // Card width — 90% of inner width, capped at 96
+    let card_width = (inner.width * 90 / 100).min(96).max(40);
+
     // Centered x position for cards
-    let card_x = inner.x + inner.width.saturating_sub(CARD_WIDTH) / 2;
+    let card_x = inner.x + inner.width.saturating_sub(card_width) / 2;
 
     // During intro: reveal oldest→newest
     // After intro: show all newest→oldest
@@ -198,7 +212,7 @@ fn render_block_list(frame: &mut Frame, app: &App, area: Rect) {
 
         let slide_x = (card_x as i32 + offset as i32)
             .max(inner.x as i32)
-            .min((inner.x + inner.width) as i32) as u16;
+            .min((inner.x + inner.width).saturating_sub(1) as i32) as u16;
 
         // Clip card height to not exceed the inner area bottom
         let max_y = inner.y + inner.height;
@@ -209,18 +223,52 @@ fn render_block_list(frame: &mut Frame, app: &App, area: Rect) {
             break;
         }
 
+        // Clip card width to not exceed the terminal buffer
+        let terminal_area = frame.area();
+        let available_width = terminal_area
+            .width
+            .saturating_sub(slide_x)
+            .min(card_width)
+            .min(inner.width);
+
+        if available_width == 0 {
+            continue;
+        }
+
         let card_rect = Rect {
             x: slide_x,
             y: actual_y,
-            width: CARD_WIDTH.min(inner.width),
+            width: available_width,
             height: available_height,
         };
 
         render_block_card(frame, block, card_rect);
     }
-}
 
-/// Renders a single block card into the given rect.
+    // Hover detection — show popup for whichever card the mouse is over
+    let mut hovered: Option<&crate::tui::app::BlockRow> = None;
+    for (i, block) in blocks_to_show.iter().enumerate() {
+        let card_top = inner.y as i32 + (i as i32) * (CARD_HEIGHT as i32 + CARD_GAP as i32);
+        let scrolled_top = card_top - app.block_scroll as i32;
+        if scrolled_top < 0 { continue; }
+        let card_bottom = scrolled_top as u16 + CARD_HEIGHT;
+        let card_left = inner.x + inner.width.saturating_sub(card_width) / 2;
+        let card_right = card_left + card_width;
+
+        if app.mouse_y >= scrolled_top as u16
+            && app.mouse_y < card_bottom
+            && app.mouse_x >= card_left
+            && app.mouse_x < card_right
+        {
+            hovered = Some(block);
+            break;
+        }
+    }
+
+    if let Some(block) = hovered {
+        render_block_hover_popup(frame, block, app.mouse_x, app.mouse_y, area);
+    }
+}
 fn render_block_card(frame: &mut Frame, block: &crate::tui::app::BlockRow, area: Rect) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -470,12 +518,16 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.mode == Mode::Copying {
         ""
     } else {
-        match &app.result {
-            Some(SearchResult::NotFound(_)) | Some(SearchResult::Error(_)) => {
+        match (&app.result, &app.screen) {
+            (_, crate::tui::app::Screen::Mempool) => {
+                "  [↑↓] Scroll   [b] Back to blocks   [q] Quit"
+            }
+            (Some(crate::tui::app::SearchResult::NotFound(_)), _)
+            | (Some(crate::tui::app::SearchResult::Error(_)), _) => {
                 "  [Esc] Back to blocks   [/] New search   [q] Quit"
             }
-            Some(_) => "  [↑↓] Scroll   [c] Copy   [Esc] Back to blocks   [q] Quit",
-            None => "  [↑↓] Scroll   [q] Quit",
+            (Some(_), _) => "  [↑↓] Scroll   [c] Copy   [Esc] Back   [q] Quit",
+            (None, _) => "  [↑↓] Scroll   [m] Mempool   [q] Quit",
         }
     };
 
@@ -682,5 +734,368 @@ fn truncate(s: &str, max_len: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max_len])
+    }
+}
+
+// ─── Block hover popup ────────────────────────────────────────────────────────
+
+fn render_block_hover_popup(
+    frame: &mut Frame,
+    block: &crate::tui::app::BlockRow,
+    mouse_x: u16,
+    mouse_y: u16,
+    area: Rect,
+) {
+    let terminal = frame.area();
+    let popup_width = 52u16;
+    let popup_height = 9u16;
+
+    // Position popup to the right of cursor, flip left if near right edge
+    let x = if mouse_x + popup_width + 2 < terminal.width {
+        mouse_x + 2
+    } else {
+        mouse_x.saturating_sub(popup_width + 2)
+    };
+
+    // Position popup below cursor, flip up if near bottom
+    let y = if mouse_y + popup_height + 1 < terminal.height {
+        mouse_y + 1
+    } else {
+        mouse_y.saturating_sub(popup_height + 1)
+    };
+
+    let popup_rect = Rect {
+        x: x.min(terminal.width.saturating_sub(popup_width)),
+        y: y.min(terminal.height.saturating_sub(popup_height)),
+        width: popup_width,
+        height: popup_height,
+    };
+
+    frame.render_widget(Clear, popup_rect);
+
+    let accent = Color::Cyan;
+    let w = popup_rect.width as usize;
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("┌{:─<width$}┐", "", width = w.saturating_sub(2)),
+            Style::default().fg(accent),
+        )),
+        Line::from(vec![
+            Span::styled("│ ", Style::default().fg(accent)),
+            Span::styled(
+                format!("{:^width$}", format!("BLOCK #{}", block.height), width = w.saturating_sub(4)),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" │", Style::default().fg(accent)),
+        ]),
+        Line::from(Span::styled(
+            format!("├{:─<width$}┤", "", width = w.saturating_sub(2)),
+            Style::default().fg(accent),
+        )),
+        Line::from(vec![
+            Span::styled("│ ", Style::default().fg(accent)),
+            Span::styled("Hash:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(truncate(&block.hash, w.saturating_sub(12)), Style::default().fg(Color::White)),
+            Span::styled(" │", Style::default().fg(accent)),
+        ]),
+        Line::from(vec![
+            Span::styled("│ ", Style::default().fg(accent)),
+            Span::styled("Time:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(block.timestamp.to_string(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:>width$} │", "", width = w.saturating_sub(10 + block.timestamp.to_string().len())),
+                Style::default().fg(accent),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("│ ", Style::default().fg(accent)),
+            Span::styled("Txs:    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(block.tx_count.to_string(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:>width$} │", "", width = w.saturating_sub(10 + block.tx_count.to_string().len())),
+                Style::default().fg(accent),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("│ ", Style::default().fg(accent)),
+            Span::styled("Size:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{} bytes", block.size), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:>width$} │", "", width = w.saturating_sub(10 + format!("{} bytes", block.size).len())),
+                Style::default().fg(accent),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("├{:─<width$}┤", "", width = w.saturating_sub(2)),
+            Style::default().fg(accent),
+        )),
+        Line::from(vec![
+            Span::styled("│ ", Style::default().fg(accent)),
+            Span::styled(
+                format!("{:^width$}", "Press / to search this block", width = w.saturating_sub(4)),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(" │", Style::default().fg(accent)),
+        ]),
+        Line::from(Span::styled(
+            format!("└{:─<width$}┘", "", width = w.saturating_sub(2)),
+            Style::default().fg(accent),
+        )),
+    ];
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), popup_rect);
+}
+
+// ─── Mempool panel ───────────────────────────────────────────────────────────
+
+fn render_mempool(frame: &mut Frame, app: &App, area: Rect) {
+    let count = app.mempool_txs.len();
+    let title = format!(" Mempool — {count} pending  |  [b] Back to blocks ");
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(title, Style::default().fg(Color::Cyan)));
+
+    frame.render_widget(outer, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    if app.mempool_txs.is_empty() {
+        let msg = Paragraph::new("\n  Mempool is empty.")
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(msg, inner);
+        return;
+    }
+
+    let card_width = (inner.width * 90 / 100).min(96).max(40);
+    let card_x = inner.x + inner.width.saturating_sub(card_width) / 2;
+    const CARD_HEIGHT: u16 = 4;
+    const CARD_GAP: u16 = 1;
+
+    for (i, tx) in app.mempool_txs.iter().enumerate() {
+        let card_top = inner.y as i32 + (i as i32) * (CARD_HEIGHT as i32 + CARD_GAP as i32);
+        let scrolled_top = card_top - app.mempool_scroll as i32;
+
+        if scrolled_top + CARD_HEIGHT as i32 <= inner.y as i32 { continue; }
+        if scrolled_top >= (inner.y + inner.height) as i32 { break; }
+        if scrolled_top < 0 { continue; }
+
+        let terminal_area = frame.area();
+        if scrolled_top as u16 >= terminal_area.height { break; }
+
+        let available_height = (inner.y + inner.height)
+            .saturating_sub(scrolled_top as u16)
+            .min(CARD_HEIGHT);
+        let available_width = terminal_area
+            .width
+            .saturating_sub(card_x)
+            .min(card_width);
+
+        if available_height == 0 || available_width == 0 { continue; }
+
+        let card_rect = Rect {
+            x: card_x,
+            y: scrolled_top as u16,
+            width: available_width,
+            height: available_height,
+        };
+
+        render_mempool_card(frame, tx, card_rect);
+    }
+}
+
+fn render_mempool_card(frame: &mut Frame, tx: &crate::tui::app::MempoolTx, area: Rect) {
+    if area.height == 0 || area.width == 0 { return; }
+    let terminal_area = frame.area();
+    if area.x >= terminal_area.width || area.y >= terminal_area.height { return; }
+
+    let w = area.width as usize;
+    let border_color = if tx.is_new { Color::Yellow } else { Color::DarkGray };
+    let label = if tx.is_new { "⚡ NEW  " } else { "       " };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("╔{:═<width$}╗", "", width = w.saturating_sub(2)),
+            Style::default().fg(border_color),
+        )),
+        Line::from(vec![
+            Span::styled("║  ", Style::default().fg(border_color)),
+            Span::styled(label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                truncate(&tx.txid, w.saturating_sub(12)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!("{:>width$}  ║", "", width = w.saturating_sub(
+                    11 + label.len() + truncate(&tx.txid, w.saturating_sub(12)).len()
+                )),
+                Style::default().fg(border_color),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("║  ", Style::default().fg(border_color)),
+            Span::styled("Fee: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} sat", tx.fee_sats),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled("   Size: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} bytes", tx.size),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                format!("{:>width$}  ║", "", width = w.saturating_sub(
+                    30 + format!("{} sat", tx.fee_sats).len() + format!("{} bytes", tx.size).len()
+                )),
+                Style::default().fg(border_color),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("╚{:═<width$}╝", "", width = w.saturating_sub(2)),
+            Style::default().fg(border_color),
+        )),
+    ];
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+/// Notification card shown at the center of the block list screen when a new tx arrives.
+fn render_mempool_notification(
+    frame: &mut Frame,
+    tx: &crate::tui::app::MempoolTx,
+    area: Rect,
+) {
+    let terminal = frame.area();
+
+    // Dim the entire block list area first — draw a dark overlay row by row
+    for row in area.y..area.y + area.height {
+        if row >= terminal.height { break; }
+        let row_rect = Rect { x: area.x, y: row, width: area.width, height: 1 };
+        frame.render_widget(
+            Paragraph::new(" ".repeat(area.width as usize).as_str())
+                .style(Style::default().add_modifier(Modifier::DIM)),
+            row_rect,
+        );
+    }
+
+    // Notification box — 75% width, 9 lines tall
+    let notif_width = (area.width * 75 / 100).max(60);
+    let notif_height = 9u16;
+    let x = area.x + area.width.saturating_sub(notif_width) / 2;
+    let y = area.y + area.height.saturating_sub(notif_height) / 2;
+
+    let notif_rect = Rect {
+        x,
+        y,
+        width: notif_width.min(terminal.width.saturating_sub(x)),
+        height: notif_height.min(terminal.height.saturating_sub(y)),
+    };
+
+    if notif_rect.width == 0 || notif_rect.height == 0 { return; }
+
+    frame.render_widget(Clear, notif_rect);
+
+    let w = notif_rect.width as usize;
+    let inner_w = w.saturating_sub(4);
+
+    let pink = Color::Gray;
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("┌{:─<width$}┐", "", width = w.saturating_sub(2)),
+            Style::default().fg(pink),
+        )),
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(pink)),
+            Span::styled(
+                format!("{:^width$}", "", width = w.saturating_sub(2)),
+                Style::default(),
+            ),
+            Span::styled("│", Style::default().fg(pink)),
+        ]),
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(pink)),
+            Span::styled(
+                format!("{:^width$}", "⚡  New Transaction Entering Mempool  ⚡", width = w.saturating_sub(2)),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("│", Style::default().fg(pink)),
+        ]),
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(pink)),
+            Span::styled(
+                format!("{:^width$}", "", width = w.saturating_sub(2)),
+                Style::default(),
+            ),
+            Span::styled("│", Style::default().fg(pink)),
+        ]),
+        Line::from(Span::styled(
+            format!("├{:─<width$}┤", "", width = w.saturating_sub(2)),
+            Style::default().fg(pink),
+        )),
+        Line::from(vec![
+            Span::styled("│  ", Style::default().fg(pink)),
+            Span::styled("TXID:     ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                truncate(&tx.txid, inner_w.saturating_sub(10)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("  │", Style::default().fg(pink)),
+        ]),
+        Line::from(vec![
+            Span::styled("│  ", Style::default().fg(pink)),
+            Span::styled("Fee:      ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{} sat", tx.fee_sats), Style::default().fg(Color::Cyan)),
+            Span::styled("   Size:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{} bytes", tx.size), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:>width$}  │", "",
+                    width = inner_w.saturating_sub(
+                        format!("Fee:      {} sat   Size:  {} bytes", tx.fee_sats, tx.size).len()
+                    )
+                ),
+                Style::default().fg(pink),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("│  ", Style::default().fg(pink)),
+            Span::styled("Arrived:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(tx.arrived_at.clone(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:>width$}  │", "",
+                    width = inner_w.saturating_sub(10 + tx.arrived_at.len())
+                ),
+                Style::default().fg(pink),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("└{:─<width$}┘", "", width = w.saturating_sub(2)),
+            Style::default().fg(pink),
+        )),
+    ];
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), notif_rect);
+    
+    // Hint below the box
+    let hint_y = y + notif_height;
+    if hint_y < terminal.height {
+        let hint_rect = Rect { x, y: hint_y, width: notif_width, height: 1 };
+        frame.render_widget(
+            Paragraph::new(
+                Line::from(Span::styled(
+                    format!("{:^width$}", "Press [m] to view all mempool transactions", width = notif_width as usize),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            ),
+            hint_rect,
+        );
     }
 }

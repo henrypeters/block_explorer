@@ -65,6 +65,24 @@ pub struct AddressResult {
     pub utxos: Vec<OutputResult>,
 }
 
+/// A single mempool transaction entry
+#[derive(Debug, Clone)]
+pub struct MempoolTx {
+    pub txid: String,
+    pub fee_sats: u64,
+    pub size: u32,
+    pub time: u64,           // unix timestamp from Bitcoin Core
+    pub arrived_at: String,  // human-readable time when we first saw it
+    pub is_new: bool,        // true briefly after first seen
+}
+
+/// Which main screen is active
+#[derive(Debug, PartialEq)]
+pub enum Screen {
+    Blocks,
+    Mempool,
+}
+
 /// A single row in the block list panel
 #[derive(Debug, Clone)]
 pub struct BlockRow {
@@ -107,8 +125,21 @@ pub struct App {
     /// Currently selected copy field index
     pub copy_selected: usize,
 
-    /// Animation tick counter — incremented every frame
-    pub tick: u64,
+    /// Which main screen is active
+    pub screen: Screen,
+
+    /// Mempool transactions (latest first)
+    pub mempool_txs: Vec<MempoolTx>,
+
+    /// Scroll offset for mempool panel
+    pub mempool_scroll: u16,
+
+    /// Notification card shown on home screen when new tx arrives
+    /// Contains the tx and the tick it arrived at
+    pub mempool_notification: Option<(MempoolTx, u64)>,
+
+    /// Frame counter — incremented every render loop
+    pub frame_count: u64,
 
     /// Whether the background sync is still running
     pub syncing: bool,
@@ -130,6 +161,13 @@ pub struct App {
 
     /// Whether the current slide is from the right (true) or left (false)
     pub intro_anim_from_right: bool,
+
+    /// Currently hovered block height (None if no card is hovered)
+    pub hovered_block: Option<i32>,
+
+    /// Mouse position
+    pub mouse_x: u16,
+    pub mouse_y: u16,
 }
 
 impl App {
@@ -145,38 +183,55 @@ impl App {
             should_quit: false,
             copy_fields: Vec::new(),
             copy_selected: 0,
-            tick: 0,
+            frame_count: 0,
             syncing: true,
             searching: false,
             new_block_flash: None,
             intro_reveal: Some(0),
             intro_last_tick: std::time::Instant::now(),
             intro_anim_offset: 0,
-            intro_anim_from_right: true, // first block slides in from right
+            intro_anim_from_right: true,
+            hovered_block: None,
+            mouse_x: 0,
+            mouse_y: 0,
+            screen: Screen::Blocks,
+            mempool_txs: Vec::new(),
+            mempool_scroll: 0,
+            mempool_notification: None,
         }
     }
 
     /// Called every frame to advance animations
     pub fn tick(&mut self) {
-        self.tick = self.tick.wrapping_add(1);
+        self.frame_count = self.frame_count.wrapping_add(1);
 
-        // Advance slide-in offset toward 0 (4 chars per frame)
+        // Advance slide-in offset toward 0 (8 chars per frame)
         if self.intro_anim_offset < 0 {
-            self.intro_anim_offset = (self.intro_anim_offset + 4).min(0);
+            self.intro_anim_offset = (self.intro_anim_offset + 8).min(0);
         } else if self.intro_anim_offset > 0 {
-            self.intro_anim_offset = (self.intro_anim_offset - 4).max(0);
+            self.intro_anim_offset = (self.intro_anim_offset - 8).max(0);
         }
 
-        // Advance intro animation — reveal one more block every 0.5s
+        // Expire mempool notification after ~1.3 seconds (13 frames at 100ms each)
+        if let Some((_, arrived_tick)) = &self.mempool_notification {
+            if self.frame_count.saturating_sub(*arrived_tick) > 13 {
+                self.mempool_notification = None;
+            }
+        }
+
         if let Some(revealed) = self.intro_reveal {
-            if self.intro_last_tick.elapsed() >= std::time::Duration::from_millis(500) {
+            let total = self.blocks.len().max(1);
+            // Distribute 4.5 seconds across all blocks, capped between 50ms and 400ms
+            let delay_ms = ((4500 / total) as u64).clamp(50, 400);
+            let delay = std::time::Duration::from_millis(delay_ms);
+
+            if self.intro_last_tick.elapsed() >= delay {
                 let total = self.blocks.len();
                 if revealed >= total {
                     self.intro_reveal = None;
                     self.intro_anim_offset = 0;
                 } else {
                     self.intro_reveal = Some(revealed + 1);
-                    // Alternate direction: odd reveals from right, even from left
                     self.intro_anim_from_right = (revealed % 2) == 0;
                     self.intro_anim_offset = if self.intro_anim_from_right { 40 } else { -40 };
                 }
@@ -185,26 +240,26 @@ impl App {
         }
     }
 
-    /// Trigger a slide-in animation for a newly mined block.
-    /// Alternates direction based on the block height (even=right, odd=left).
-    pub fn trigger_new_block_slide(&mut self, height: i32) {
-        self.intro_anim_from_right = (height % 2) == 0;
-        self.intro_anim_offset = if self.intro_anim_from_right { 40 } else { -40 };
-    }
-
     /// Returns the current spinner frame character
     pub fn spinner_frame(&self) -> &'static str {
         const FRAMES: &[&str] = &["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
-        FRAMES[(self.tick / 3) as usize % FRAMES.len()]
+        FRAMES[(self.frame_count / 3) as usize % FRAMES.len()]
     }
 
     /// Returns true if the new block flash is still active for a given height
     pub fn is_flashing(&self, height: i32) -> bool {
         if let Some((h, arrived_tick)) = self.new_block_flash {
-            h == height && self.tick.saturating_sub(arrived_tick) < 20
+            h == height && self.frame_count.saturating_sub(arrived_tick) < 20
         } else {
             false
         }
+    }
+
+    /// Trigger a slide-in animation for a newly mined block.
+    /// Alternates direction based on the block height (even=right, odd=left).
+    pub fn trigger_new_block_slide(&mut self, height: i32) {
+        self.intro_anim_from_right = (height % 2) == 0;
+        self.intro_anim_offset = if self.intro_anim_from_right { 40 } else { -40 };
     }
 
     pub fn enter_search_mode(&mut self) {
@@ -261,6 +316,8 @@ impl App {
     pub fn scroll_up(&mut self) {
         if self.result.is_some() {
             self.scroll = self.scroll.saturating_sub(1);
+        } else if self.screen == Screen::Mempool {
+            self.mempool_scroll = self.mempool_scroll.saturating_sub(1);
         } else {
             self.block_scroll = self.block_scroll.saturating_sub(1);
         }
@@ -269,9 +326,9 @@ impl App {
     pub fn scroll_down(&mut self) {
         if self.result.is_some() {
             self.scroll = self.scroll.saturating_add(1);
+        } else if self.screen == Screen::Mempool {
+            self.mempool_scroll = self.mempool_scroll.saturating_add(1);
         } else {
-            // Cap scroll so we can't go past the last block card
-            // Each card is 6 lines (5 + 1 gap)
             let max_scroll = (self.blocks.len() as u16).saturating_sub(1) * 6;
             self.block_scroll = (self.block_scroll + 1).min(max_scroll);
         }

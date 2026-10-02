@@ -223,3 +223,27 @@ bitcoin-cli -regtest -rpcuser=polaruser -rpcpassword=polarpass -rpcport=18443 \
   generatetoaddress 1 $(bitcoin-cli -regtest -rpcuser=polaruser \
   -rpcpassword=polarpass -rpcport=18443 getnewaddress)
 ```
+
+
+
+```
+A personalized Bitcoin mining and blockchain intelligence explorer that combines real-time Bitcoin network data, mining data, miner-specific performance data, and transaction-analysis logic. The explorer provides standard blockchain search functionality while focusing primarily on Bitcoin mining and the broader mining ecosystem. It is designed for both existing miners and aspiring miners who may not yet own mining hardware, giving users access to a broad range of information and intelligence about the Bitcoin mining world.
+
+The explorer will focus primarily on two core areas: Economics Intelligence and Blockchain Intelligence.
+
+Economics Intelligence will help users understand the financial and operational side of Bitcoin mining by providing information such as mining profitability, electricity costs, hardware economics, network difficulty, network hashrate, pool fees and reward structures, expected BTC production, mining revenue, operating costs, and different mining scenarios. Users will be able to model potential mining operations based on factors such as available capital, electricity costs, hashrate, hardware, and pool participation, while existing miners can connect their actual mining data to compare real-world performance against expected outcomes.
+
+Blockchain Intelligence will provide users with a deeper understanding of the Bitcoin network by allowing them to explore blocks, transactions, addresses, UTXOs, the mempool, mining activity, coinbase transactions, fees, network difficulty, network hashrate, and other on-chain activity. The system will analyze blockchain data to provide context around what is happening in the network and how those events relate to Bitcoin mining.
+
+The explorer will track current mainnet difficulty and network hashrate and use this information together with a user's hashrate, if the user already has a machine, to calculate personalized expected block production and the probability of finding a block over different time periods. For existing miners, it can also analyze miner-specific performance and help quantify the financial consequences of problems such as reduced hashrate, downtime, overheating, hardware degradation, or other operational issues by estimating their effect on expected Bitcoin production and mining revenue.
+
+The platform will also provide mining ecosystem intelligence, allowing users to study and compare mining pools, their activity, hashrate, reward structures, fees, payouts, and other relevant characteristics. This information will be useful both to existing miners evaluating their current mining operation and to aspiring miners researching how to enter the Bitcoin mining ecosystem.
+
+Users will create accounts not only to connect existing mining hardware or mining pools, but also to build a personalized mining profile before they own any hardware. An aspiring miner can use the platform to learn about the mining ecosystem, model hypothetical mining operations, investigate hardware and pool economics, and understand how changes in Bitcoin's network conditions can affect potential mining outcomes. As the user progresses from researching mining to operating actual hardware, the same account can become connected to their mining machines, pool accounts, and operational data.
+
+The overall goal is to create more than a conventional blockchain explorer: a personalized Bitcoin mining intelligence platform that helps users understand what is happening in the Bitcoin network, what it means economically, and what those conditions mean for their own potential or existing mining operation.
+
+The intended user lifecycle is:
+
+Interested in Bitcoin mining → Create account → Explore mining information → Model potential mining operations → Research hardware and pools → Acquire hardware → Connect mining equipment → Monitor actual performance → Compare actual performance against expected outcomes → Analyze and improve the mining operation.
+```

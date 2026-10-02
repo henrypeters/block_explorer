@@ -61,6 +61,8 @@ pub async fn listen(pool: &PgPool, rpc: &RpcClient, network: Network) {
         Arc::new(Mutex::new(SharedState {
             syncing: false,
             latest_block_height: None,
+            new_mempool_txs: Vec::new(),
+            all_mempool_txs: Vec::new(),
         })),
     )
     .await;

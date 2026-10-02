@@ -52,4 +52,17 @@ impl RpcClient {
     ) -> Result<bitcoincore_rpc::json::GetBlockHeaderResult, ExplorerError> {
         Ok(self.inner.get_block_header_info(hash)?)
     }
+
+    /// Returns all txids currently in the mempool.
+    pub fn get_raw_mempool(&self) -> Result<Vec<bitcoin::Txid>, ExplorerError> {
+        Ok(self.inner.get_raw_mempool()?)
+    }
+
+    /// Returns details for a specific mempool transaction.
+    pub fn get_mempool_entry(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> Result<bitcoincore_rpc::json::GetMempoolEntryResult, ExplorerError> {
+        Ok(self.inner.get_mempool_entry(txid)?)
+    }
 }
