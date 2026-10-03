@@ -65,7 +65,19 @@ pub struct AddressResult {
     pub utxos: Vec<OutputResult>,
 }
 
-/// A single mempool transaction entry
+/// Network statistics shown on the stats screen
+#[derive(Debug, Clone)]
+pub struct NetworkStats {
+    pub height: u64,
+    pub difficulty: f64,
+    pub network_hashps: f64,
+    pub mempool_tx_count: u64,
+    pub next_adjustment_blocks: i64,  // blocks until next difficulty adjustment
+    pub last_block_time: u64,         // unix timestamp of last block
+    pub avg_block_time_secs: f64,     // average over last 10 blocks
+    pub block_subsidy_sats: u64,      // current block reward in sats
+    pub chain: String,
+}
 #[derive(Debug, Clone)]
 pub struct MempoolTx {
     pub txid: String,
@@ -74,6 +86,46 @@ pub struct MempoolTx {
     pub time: u64,           // unix timestamp from Bitcoin Core
     pub arrived_at: String,  // human-readable time when we first saw it
     pub is_new: bool,        // true briefly after first seen
+}
+
+/// A pool entry for the Top Pools panel
+#[derive(Debug, Clone)]
+pub struct PoolEntry {
+    pub name: String,
+    pub blocks: i64,
+    pub share_pct: f64,
+    pub est_hashrate_ehs: f64,
+    pub avg_interval_mins: f64,
+}
+
+/// A miner address entry under a pool
+#[derive(Debug, Clone)]
+pub struct PoolMiner {
+    pub address: String,
+    pub blocks: i64,
+    pub share_pct: f64,
+    pub est_revenue_btc: f64,
+}
+
+/// A miner performance entry
+#[derive(Debug, Clone)]
+pub struct MinerPerf {
+    pub address: String,
+    pub blocks: i64,
+    pub est_hashrate_ehs: f64,
+    pub avg_interval_mins: f64,
+    pub gap_hours: Option<f64>,
+    pub est_btc_lost: Option<f64>,
+    pub total_revenue_btc: f64,
+}
+
+/// Which detail screen is open
+#[derive(Debug, PartialEq)]
+pub enum DetailScreen {
+    None,
+    NetworkStats,
+    PoolIntelligence,
+    MinerPerformance,
 }
 
 /// Which main screen is active
@@ -162,7 +214,26 @@ pub struct App {
     /// Whether the current slide is from the right (true) or left (false)
     pub intro_anim_from_right: bool,
 
-    /// Currently hovered block height (None if no card is hovered)
+    /// Network statistics (refreshed periodically)
+    pub network_stats: Option<NetworkStats>,
+
+    /// Pool data for Top Pools panel
+    pub pools: Vec<PoolEntry>,
+
+    /// Pool miners for Pool Intelligence detail screen
+    pub pool_miners: Vec<(String, Vec<PoolMiner>)>, // (pool_name, miners)
+
+    /// Miner performance data
+    pub miner_perfs: Vec<MinerPerf>,
+
+    /// Which detail screen is open
+    pub detail_screen: DetailScreen,
+
+    /// Scroll offset for detail screens
+    pub detail_scroll: u16,
+
+    /// Currently selected network in the network selector (0=regtest, 1=mainnet)
+    pub network_select_idx: usize,
     pub hovered_block: Option<i32>,
 
     /// Mouse position
@@ -194,6 +265,13 @@ impl App {
             hovered_block: None,
             mouse_x: 0,
             mouse_y: 0,
+            network_stats: None,
+            pools: Vec::new(),
+            pool_miners: Vec::new(),
+            miner_perfs: Vec::new(),
+            detail_screen: DetailScreen::None,
+            detail_scroll: 0,
+            network_select_idx: 0,
             screen: Screen::Blocks,
             mempool_txs: Vec::new(),
             mempool_scroll: 0,
@@ -205,11 +283,11 @@ impl App {
     pub fn tick(&mut self) {
         self.frame_count = self.frame_count.wrapping_add(1);
 
-        // Advance slide-in offset toward 0 (8 chars per frame)
+        // Advance slide-in offset toward 0 (20 chars per frame — fast)
         if self.intro_anim_offset < 0 {
-            self.intro_anim_offset = (self.intro_anim_offset + 8).min(0);
+            self.intro_anim_offset = (self.intro_anim_offset + 20).min(0);
         } else if self.intro_anim_offset > 0 {
-            self.intro_anim_offset = (self.intro_anim_offset - 8).max(0);
+            self.intro_anim_offset = (self.intro_anim_offset - 20).max(0);
         }
 
         // Expire mempool notification after ~1.3 seconds (13 frames at 100ms each)
@@ -222,7 +300,7 @@ impl App {
         if let Some(revealed) = self.intro_reveal {
             let total = self.blocks.len().max(1);
             // Distribute 4.5 seconds across all blocks, capped between 50ms and 400ms
-            let delay_ms = ((4500 / total) as u64).clamp(50, 400);
+            let delay_ms = ((4500 / total) as u64).clamp(50, 150);
             let delay = std::time::Duration::from_millis(delay_ms);
 
             if self.intro_last_tick.elapsed() >= delay {
@@ -260,6 +338,34 @@ impl App {
     pub fn trigger_new_block_slide(&mut self, height: i32) {
         self.intro_anim_from_right = (height % 2) == 0;
         self.intro_anim_offset = if self.intro_anim_from_right { 40 } else { -40 };
+    }
+
+    /// Called when user clicks somewhere — opens detail screen if on a panel
+    pub fn handle_panel_click(&mut self, _col: u16, row: u16) {
+        if self.detail_screen != DetailScreen::None || self.result.is_some() {
+            return;
+        }
+        let content_start = 8u16;
+        let network_end = content_start + 8;
+        let pools_end = network_end + 14;
+
+        if row >= content_start && row < network_end {
+            self.detail_screen = DetailScreen::NetworkStats;
+            self.detail_scroll = 0;
+            self.status = "Network Stats  |  [Esc] Back".to_string();
+        } else if row >= network_end && row < pools_end {
+            if !self.pools.is_empty() {
+                self.detail_screen = DetailScreen::PoolIntelligence;
+                self.detail_scroll = 0;
+                self.status = "Pool Intelligence  |  [Esc] Back   [↑↓] Scroll".to_string();
+            }
+        } else if row >= pools_end {
+            if !self.miner_perfs.is_empty() {
+                self.detail_screen = DetailScreen::MinerPerformance;
+                self.detail_scroll = 0;
+                self.status = "Miner Performance  |  [Esc] Back   [↑↓] Scroll".to_string();
+            }
+        }
     }
 
     pub fn enter_search_mode(&mut self) {

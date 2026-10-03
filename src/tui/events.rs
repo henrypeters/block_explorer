@@ -45,16 +45,44 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char('m') => {
-            app.screen = crate::tui::app::Screen::Mempool;
-            app.status = "Mempool  |  [b] Back to blocks   [↑↓] Scroll   [q] Quit".to_string();
+            // Mempool only available on regtest
+            let is_mainnet = app.network_stats.as_ref()
+                .map(|s| s.chain == "main")
+                .unwrap_or(false);
+            if !is_mainnet {
+                app.screen = crate::tui::app::Screen::Mempool;
+                app.status = "Mempool  |  [b] Back to blocks   [↑↓] Scroll   [q] Quit".to_string();
+            } else {
+                app.status = "Mempool is not available on mainnet.".to_string();
+            }
         }
         KeyCode::Char('b') => {
             app.screen = crate::tui::app::Screen::Blocks;
             app.status = "Click the search box or press / to search.".to_string();
         }
-        KeyCode::Esc => app.clear(),
-        KeyCode::Up => app.scroll_up(),
-        KeyCode::Down => app.scroll_down(),
+        KeyCode::Esc => {
+            if app.detail_screen != crate::tui::app::DetailScreen::None {
+                app.detail_screen = crate::tui::app::DetailScreen::None;
+                app.detail_scroll = 0;
+                app.status = "Click the search box or press / to search.".to_string();
+            } else {
+                app.clear();
+            }
+        }
+        KeyCode::Up => {
+            if app.detail_screen != crate::tui::app::DetailScreen::None {
+                app.detail_scroll = app.detail_scroll.saturating_sub(1);
+            } else {
+                app.scroll_up();
+            }
+        }
+        KeyCode::Down => {
+            if app.detail_screen != crate::tui::app::DetailScreen::None {
+                app.detail_scroll = app.detail_scroll.saturating_add(1);
+            } else {
+                app.scroll_down();
+            }
+        }
         _ => {}
     }
 }
@@ -139,14 +167,29 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
                 if app.mode == Mode::Searching {
                     app.exit_search_mode();
                 }
+                app.mouse_x = mouse.column;
+                app.mouse_y = mouse.row;
+                app.handle_panel_click(mouse.column, mouse.row);
             }
         }
         MouseEventKind::Moved => {
             app.mouse_x = mouse.column;
             app.mouse_y = mouse.row;
         }
-        MouseEventKind::ScrollUp => app.scroll_up(),
-        MouseEventKind::ScrollDown => app.scroll_down(),
+        MouseEventKind::ScrollUp => {
+            if app.detail_screen != crate::tui::app::DetailScreen::None {
+                app.detail_scroll = app.detail_scroll.saturating_sub(1);
+            } else {
+                app.scroll_up();
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if app.detail_screen != crate::tui::app::DetailScreen::None {
+                app.detail_scroll = app.detail_scroll.saturating_add(1);
+            } else {
+                app.scroll_down();
+            }
+        }
         _ => {}
     }
 }

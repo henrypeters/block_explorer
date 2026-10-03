@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE transaction_outputs SET is_spent = TRUE\n         WHERE txid = $1 AND output_index = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2cc75a61f9a36239431a21c6f281463c810fb6f6ef3db7ed1e0b7b53c41a510a"
+}

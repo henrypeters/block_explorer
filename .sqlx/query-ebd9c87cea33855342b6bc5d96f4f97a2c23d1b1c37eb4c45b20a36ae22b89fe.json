@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO transactions\n            (txid, block_height, block_hash, tx_index, version, locktime, is_coinbase, size)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n         ON CONFLICT (txid) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Text",
+        "Int4",
+        "Int4",
+        "Int8",
+        "Bool",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ebd9c87cea33855342b6bc5d96f4f97a2c23d1b1c37eb4c45b20a36ae22b89fe"
+}

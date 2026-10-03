@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(SUM(value_sats), 0)::BIGINT\n                 FROM transaction_outputs WHERE address = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "coalesce",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "151f5afabf9a0542d5c335628f6dfbbde184c51905cdb1b1bd1609966bff55fd"
+}

@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT txid, block_height, is_coinbase FROM transactions\n         WHERE block_height = $1 ORDER BY tx_index ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "txid",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "block_height",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "is_coinbase",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7adaa259802bd1d004af48adcf472c2e6f8d6ccdca9bef80d83463374674fb13"
+}

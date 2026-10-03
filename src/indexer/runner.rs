@@ -1,132 +1,151 @@
 use bitcoin::Network;
-use colored::Colorize;
 use sqlx::PgPool;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tokio::time::{Duration, sleep};
 use tracing::error;
 
 use crate::db::blocks::insert_block;
 use crate::db::state::{get_last_indexed_height, set_last_indexed_height};
-use crate::indexer::display::print_block;
+use crate::config::Config;
 use crate::rpc::client::RpcClient;
 
-/// Runs the initial sync — indexes all blocks from last indexed height to chain tip.
-pub async fn run(pool: &PgPool, rpc: &RpcClient, network: Network) {
-    let last_height = match get_last_indexed_height(pool).await {
-        Ok(h) => h,
-        Err(e) => {
-            error!("Failed to read indexer state: {e}");
-            return;
+const MAX_CONCURRENT: usize = 8;
+const MAX_RETRIES: u32 = 4;
+const RETRY_DELAY_MS: u64 = 800;
+const CHUNK_SIZE: u64 = 30;
+
+/// Runs forever — syncs to chain tip then waits for new blocks.
+/// Automatically resumes if a batch fails partway through.
+pub async fn run_silent(pool: &PgPool, rpc: &RpcClient, network: Network) {
+    // Fix any mismatch between indexer_state and actual blocks on startup
+    let _ = sqlx::query!(
+        "UPDATE indexer_state SET last_indexed_height = COALESCE((SELECT MAX(height) FROM blocks), -1)"
+    )
+    .execute(pool)
+    .await;
+
+    loop {
+        let last_height = match get_last_indexed_height(pool).await {
+            Ok(h) => h,
+            Err(e) => { error!("Failed to read indexer state: {e}"); sleep(Duration::from_secs(5)).await; continue; }
+        };
+
+        let chain_tip = match rpc.get_block_count().await {
+            Ok(h) => h,
+            Err(e) => { error!("Failed to get block count: {e}"); sleep(Duration::from_secs(10)).await; continue; }
+        };
+
+        let start_height = (last_height + 1) as u64;
+
+        if start_height > chain_tip {
+            // Caught up — check again in 30 seconds
+            sleep(Duration::from_secs(30)).await;
+            continue;
         }
-    };
 
-    let start_height = (last_height + 1) as u64;
-
-    let chain_tip = match rpc.get_block_count() {
-        Ok(h) => h,
-        Err(e) => {
-            error!("Failed to get block count from Bitcoin Core: {e}");
-            return;
-        }
-    };
-
-    if start_height > chain_tip {
-        // Already up to date — re-fetch and print all indexed blocks for display
-        println!(
-            "\n{} Already up to date at height {}. Printing indexed blocks...\n",
-            "✔".green().bold(),
-            chain_tip.to_string().yellow()
-        );
-        print_all_indexed_blocks(pool, rpc, network).await;
-        return;
+        index_range(pool, rpc, network, start_height, chain_tip).await;
     }
+}
 
-    println!(
-        "\n{} Syncing blocks {} → {}\n",
-        "⟳".cyan().bold(),
-        start_height.to_string().yellow(),
-        chain_tip.to_string().yellow()
-    );
+/// Indexes a range of blocks in chunks of CHUNK_SIZE with MAX_CONCURRENT parallelism.
+async fn index_range(pool: &PgPool, rpc: &RpcClient, network: Network, start: u64, end: u64) {
+    let rpc_url = rpc.url.clone();
+    let rpc_user = rpc.user.clone();
+    let rpc_pass = rpc.password.clone();
+    let network_str = match network {
+        Network::Bitcoin => "mainnet",
+        Network::Testnet => "testnet",
+        _ => "regtest",
+    }.to_string();
 
-    for height in start_height..=chain_tip {
-        match fetch_and_index(pool, rpc, height, network).await {
-            Ok(_) => {}
-            Err(e) => {
-                error!("Failed to index block {height}: {e}");
-                return;
+    let mut height = start;
+
+    while height <= end {
+        let chunk_end = (height + CHUNK_SIZE - 1).min(end);
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
+        let mut handles = Vec::new();
+
+        for h in height..=chunk_end {
+            let sem = semaphore.clone();
+            let url = rpc_url.clone();
+            let user = rpc_user.clone();
+            let pass = rpc_pass.clone();
+            let net = network_str.clone();
+
+            let handle = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+
+                for attempt in 0..MAX_RETRIES {
+                    if attempt > 0 {
+                        sleep(Duration::from_millis(RETRY_DELAY_MS * attempt as u64)).await;
+                    }
+
+                    let cfg = Config {
+                        rpc_url: url.clone(),
+                        rpc_user: user.clone(),
+                        rpc_password: pass.clone(),
+                        database_url: String::new(),
+                        network: net.clone(),
+                        zmq_block_url: String::new(),
+                    };
+
+                    let client = match RpcClient::new(&cfg) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+
+                    let hash = match client.get_block_hash(h).await {
+                        Ok(hash) => hash,
+                        Err(_) => continue,
+                    };
+
+                    match client.get_block(&hash).await {
+                        Ok(block) => return Some((h, block)),
+                        Err(_) => continue,
+                    }
+                }
+
+                error!("Skipping block {h} after {MAX_RETRIES} failed attempts");
+                None
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            match handle.await {
+                Ok(Some((h, block))) => {
+                    if let Err(e) = insert_block(pool, &block, h as i32, network).await {
+                        error!("Failed to insert block {h}: {e}");
+                        continue;
+                    }
+                    if let Err(e) = set_last_indexed_height(pool, h as i32).await {
+                        error!("Failed to update state at {h}: {e}");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => { error!("Task join error: {e}"); }
             }
         }
-    }
 
-    println!(
-        "\n{} Sync complete. Indexed up to block {}.\n",
-        "✔".green().bold(),
-        chain_tip.to_string().yellow()
-    );
-}
+        // Always advance past this chunk — even if some blocks were skipped
+        // This prevents getting stuck retrying the same failed blocks forever
+        let _ = set_last_indexed_height(pool, chunk_end as i32).await;
 
-/// Silent version of run — used when TUI is active.
-/// Indexes blocks without printing anything to stdout.
-pub async fn run_silent(pool: &PgPool, rpc: &RpcClient, network: Network) {
-    let last_height = match get_last_indexed_height(pool).await {
-        Ok(h) => h,
-        Err(e) => { error!("Failed to read indexer state: {e}"); return; }
-    };
-
-    let start_height = (last_height + 1) as u64;
-
-    let chain_tip = match rpc.get_block_count() {
-        Ok(h) => h,
-        Err(e) => { error!("Failed to get block count: {e}"); return; }
-    };
-
-    if start_height > chain_tip {
-        return;
-    }
-
-    for height in start_height..=chain_tip {
-        if let Err(e) = fetch_and_index(pool, rpc, height, network).await {
-            error!("Failed to index block {height}: {e}");
-            return;
-        }
-    }
-}
-async fn print_all_indexed_blocks(pool: &PgPool, rpc: &RpcClient, network: Network) {
-    let rows = match sqlx::query!("SELECT height FROM blocks ORDER BY height ASC")
-        .fetch_all(pool)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Failed to query indexed blocks: {e}");
-            return;
-        }
-    };
-
-    for row in rows {
-        let height = row.height as u64;
-        let hash = match rpc.get_block_hash(height) {
-            Ok(h) => h,
-            Err(e) => { error!("Failed to get hash for block {height}: {e}"); continue; }
-        };
-        let block = match rpc.get_block(&hash) {
-            Ok(b) => b,
-            Err(e) => { error!("Failed to fetch block {height}: {e}"); continue; }
-        };
-        print_block(&block, height, network);
+        height = chunk_end + 1;
     }
 }
 
-/// Fetches a block, writes it to the database, and prints its full detail.
 pub async fn fetch_and_index(
     pool: &PgPool,
     rpc: &RpcClient,
     height: u64,
     network: Network,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let hash = rpc.get_block_hash(height)?;
-    let block = rpc.get_block(&hash)?;
-
+    let hash = rpc.get_block_hash(height).await?;
+    let block = rpc.get_block(&hash).await?;
     insert_block(pool, &block, height as i32, network).await?;
     set_last_indexed_height(pool, height as i32).await?;
-
     Ok(())
 }

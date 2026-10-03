@@ -7,26 +7,15 @@ use crate::rpc::client::RpcClient;
 use crate::tui::SharedState;
 use crate::tui::app::MempoolTx;
 
-/// Returns current unix timestamp as u64.
 fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-/// Formats a unix timestamp as HH:MM:SS.
 fn format_time(unix: u64) -> String {
     let secs = unix % 86400;
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    format!("{h:02}:{m:02}:{s:02}")
+    format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
 }
 
-/// Polls Bitcoin Core's mempool every 3 seconds.
-/// Only notifies the TUI for transactions that arrived after the program started.
-/// Pre-existing transactions are loaded silently into the mempool panel.
 pub async fn poll(rpc: &RpcClient, shared: Arc<Mutex<SharedState>>) {
     let mut ticker = interval(Duration::from_secs(3));
     let mut known_txids: HashSet<String> = HashSet::new();
@@ -36,25 +25,21 @@ pub async fn poll(rpc: &RpcClient, shared: Arc<Mutex<SharedState>>) {
     loop {
         ticker.tick().await;
 
-        let txids = match rpc.get_raw_mempool() {
+        let txids = match rpc.get_raw_mempool().await {
             Ok(t) => t,
             Err(_) => continue,
         };
 
         let current_txids: HashSet<String> = txids.iter().map(|t| t.to_string()).collect();
-
         let mut all_txs: Vec<MempoolTx> = Vec::new();
         let mut new_txs: Vec<MempoolTx> = Vec::new();
 
         for txid in &txids {
-            match rpc.get_mempool_entry(txid) {
+            match rpc.get_mempool_entry(txid).await {
                 Ok(entry) => {
-                    let fee_sats = entry.fees.base.to_sat();
+                    let fee_sats = entry.fees.to_sat();
                     let txid_str = txid.to_string();
                     let is_brand_new = !known_txids.contains(&txid_str);
-
-                    // Only notify for txs that arrived after program start
-                    // and not on the first poll (first poll = pre-existing txs)
                     let notify = is_brand_new && !first_poll && entry.time >= start_time;
 
                     let tx = MempoolTx {
@@ -66,15 +51,10 @@ pub async fn poll(rpc: &RpcClient, shared: Arc<Mutex<SharedState>>) {
                         is_new: notify,
                     };
 
-                    if notify {
-                        new_txs.push(tx.clone());
-                    }
+                    if notify { new_txs.push(tx.clone()); }
                     all_txs.push(tx);
                 }
-                Err(_) => {
-                    // Transaction was confirmed or evicted between get_raw_mempool
-                    // and get_mempool_entry — silently skip it, this is normal
-                }
+                Err(_) => {} // tx confirmed or evicted — skip silently
             }
         }
 
