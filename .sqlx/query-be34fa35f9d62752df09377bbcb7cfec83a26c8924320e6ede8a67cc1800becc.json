@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE indexer_state SET last_indexed_height = $1, updated_at = NOW() WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "be34fa35f9d62752df09377bbcb7cfec83a26c8924320e6ede8a67cc1800becc"
+}

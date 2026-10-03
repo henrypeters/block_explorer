@@ -1,7 +1,8 @@
 use sqlx::PgPool;
 
 use crate::tui::app::{
-    AddressResult, BlockResult, BlockRow, InputResult, OutputResult, SearchResult, TxResult,
+    AddressResult, BlockResult, BlockRow, InputResult, MinerPerf,
+    OutputResult, PoolEntry, PoolMiner, SearchResult, TxResult,
 };
 
 /// Loads the most recent blocks from the database (latest first).
@@ -22,6 +23,171 @@ pub async fn load_recent_blocks(pool: &PgPool) -> Vec<BlockRow> {
         size: r.size,
     })
     .collect()
+}
+
+/// Loads pool statistics from indexed blocks (excludes Unknown).
+pub async fn load_pools(pool: &PgPool, network_hashps: f64) -> Vec<PoolEntry> {
+    let total: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM blocks WHERE pool_name IS NOT NULL")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(Some(0))
+        .unwrap_or(0);
+
+    if total == 0 { return Vec::new(); }
+
+    sqlx::query!(
+        "SELECT pool_name, COUNT(*) as blocks
+         FROM blocks
+         WHERE pool_name IS NOT NULL AND pool_name != 'Unknown'
+         GROUP BY pool_name
+         ORDER BY blocks DESC"
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| {
+        let blocks = r.blocks.unwrap_or(0);
+        let share = blocks as f64 / total as f64;
+        let est_hashrate = network_hashps * share / 1e18; // EH/s
+        let avg_interval = if blocks > 0 { 100.0 / blocks as f64 * 10.0 } else { 0.0 };
+        PoolEntry {
+            name: r.pool_name.unwrap_or_default(),
+            blocks,
+            share_pct: share * 100.0,
+            est_hashrate_ehs: est_hashrate,
+            avg_interval_mins: avg_interval,
+        }
+    })
+    .collect()
+}
+
+/// Loads miner addresses per pool for Pool Intelligence detail screen.
+pub async fn load_pool_miners(pool: &PgPool) -> Vec<(String, Vec<PoolMiner>)> {
+    // Get all identified pools
+    let pools = sqlx::query!(
+        "SELECT DISTINCT pool_name FROM blocks
+         WHERE pool_name IS NOT NULL AND pool_name != 'Unknown'
+         ORDER BY pool_name"
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut result = Vec::new();
+
+    for p in pools {
+        let pool_name = match p.pool_name {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Get coinbase output addresses for blocks mined by this pool
+        let miners = sqlx::query!(
+            "SELECT to_.address, COUNT(*) as blocks
+             FROM transaction_outputs to_
+             JOIN transactions t ON to_.txid = t.txid
+             JOIN blocks b ON t.block_height = b.height
+             WHERE b.pool_name = $1
+               AND t.is_coinbase = true
+               AND to_.output_index = 0
+               AND to_.address IS NOT NULL
+             GROUP BY to_.address
+             ORDER BY blocks DESC",
+            pool_name
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let pool_total: i64 = miners.iter().map(|m| m.blocks.unwrap_or(0)).sum();
+
+        let miner_list: Vec<PoolMiner> = miners.into_iter().map(|m| {
+            let blocks = m.blocks.unwrap_or(0);
+            let share = if pool_total > 0 { blocks as f64 / pool_total as f64 } else { 0.0 };
+            PoolMiner {
+                address: m.address.unwrap_or_default(),
+                blocks,
+                share_pct: share * 100.0,
+                est_revenue_btc: blocks as f64 * 3.125,
+            }
+        }).collect();
+
+        if !miner_list.is_empty() {
+            result.push((pool_name, miner_list));
+        }
+    }
+
+    result
+}
+
+/// Loads miner performance data — top coinbase addresses with gap detection.
+pub async fn load_miner_perfs(pool: &PgPool, network_hashps: f64) -> Vec<MinerPerf> {
+    let total: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM blocks")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(Some(0))
+        .unwrap_or(0);
+
+    if total == 0 { return Vec::new(); }
+
+    let miners = sqlx::query!(
+        "SELECT to_.address, COUNT(*) as blocks,
+                MIN(b.timestamp) as first_seen,
+                MAX(b.timestamp) as last_seen
+         FROM transaction_outputs to_
+         JOIN transactions t ON to_.txid = t.txid
+         JOIN blocks b ON t.block_height = b.height
+         WHERE t.is_coinbase = true
+           AND to_.output_index = 0
+           AND to_.address IS NOT NULL
+         GROUP BY to_.address
+         HAVING COUNT(*) >= 2
+         ORDER BY blocks DESC
+         LIMIT 20"
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    miners.into_iter().map(|m| {
+        let blocks = m.blocks.unwrap_or(0);
+        let share = blocks as f64 / total as f64;
+        let est_hashrate = network_hashps * share / 1e18;
+        let first = m.first_seen.unwrap_or(0);
+        let last = m.last_seen.unwrap_or(0);
+        let time_span_hours = (last - first) as f64 / 3600.0;
+        let avg_interval = if blocks > 1 && time_span_hours > 0.0 {
+            time_span_hours * 60.0 / (blocks - 1) as f64
+        } else { 0.0 };
+
+        // Gap detection — if avg interval is known and time since last block is 2x avg
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let hours_since_last = (now_unix - last) as f64 / 3600.0;
+        let gap_hours = if avg_interval > 0.0 && hours_since_last > avg_interval * 2.0 / 60.0 {
+            Some(hours_since_last)
+        } else {
+            None
+        };
+
+        let est_btc_lost = gap_hours.map(|gap| {
+            let expected_blocks = gap / (avg_interval / 60.0).max(0.001);
+            expected_blocks * 3.125
+        });
+
+        MinerPerf {
+            address: m.address.unwrap_or_default(),
+            blocks,
+            est_hashrate_ehs: est_hashrate,
+            avg_interval_mins: avg_interval,
+            gap_hours,
+            est_btc_lost,
+            total_revenue_btc: blocks as f64 * 3.125,
+        }
+    }).collect()
 }
 
 /// Detects what the user typed and runs the appropriate query.

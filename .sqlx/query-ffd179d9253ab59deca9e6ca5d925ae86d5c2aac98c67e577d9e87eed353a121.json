@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE indexer_state SET last_indexed_height = COALESCE((SELECT MAX(height) FROM blocks), -1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ffd179d9253ab59deca9e6ca5d925ae86d5c2aac98c67e577d9e87eed353a121"
+}

@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use tracing::debug;
 
 use crate::db::outputs::mark_output_spent;
+use crate::indexer::pools::identify_pool;
 
 /// Writes a full block and all its transactions, inputs, and outputs
 /// to the database inside a single PostgreSQL transaction.
@@ -22,11 +23,19 @@ pub async fn insert_block(
     let block_size = serialize(block).len() as i32;
     let tx_count = block.txdata.len() as i32;
 
+    // Extract pool name from coinbase script
+    let pool_name = block.txdata.first().and_then(|coinbase_tx| {
+        coinbase_tx.input.first().map(|input| {
+            let hex = hex::encode(input.script_sig.as_bytes());
+            identify_pool(&hex)
+        })
+    }).flatten();
+
     // --- Insert block ---
     sqlx::query!(
         "INSERT INTO blocks
-            (height, hash, version, prev_hash, merkle_root, timestamp, bits, nonce, size, tx_count)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            (height, hash, version, prev_hash, merkle_root, timestamp, bits, nonce, size, tx_count, pool_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (height) DO NOTHING",
         height,
         block_hash,
@@ -38,6 +47,7 @@ pub async fn insert_block(
         block.header.nonce as i64,
         block_size,
         tx_count,
+        pool_name,
     )
     .execute(&mut *tx)
     .await?;

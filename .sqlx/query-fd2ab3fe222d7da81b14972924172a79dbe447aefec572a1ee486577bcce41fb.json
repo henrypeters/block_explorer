@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT input_index, prev_txid, prev_vout, script_sig\n         FROM transaction_inputs WHERE txid = $1 ORDER BY input_index ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "input_index",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "prev_txid",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "prev_vout",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "script_sig",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "fd2ab3fe222d7da81b14972924172a79dbe447aefec572a1ee486577bcce41fb"
+}

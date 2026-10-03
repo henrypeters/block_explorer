@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT output_index, value_sats, address, script_type, is_spent\n         FROM transaction_outputs WHERE txid = $1 ORDER BY output_index ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "output_index",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "value_sats",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "script_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "is_spent",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "3354d06933f43358dab4e0c8ce91817901498ea04d02671ae958a2e5004e0bc6"
+}

@@ -36,11 +36,11 @@ async fn main() {
 
     // Connect to Bitcoin Core
     let rpc = RpcClient::new(&config).expect("Failed to connect to Bitcoin Core RPC");
-    rpc.get_blockchain_info().expect("Failed to connect to Bitcoin Core");
+    rpc.get_blockchain_info().await.expect("Failed to connect to Bitcoin Core");
 
     // Connect to PostgreSQL
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(20)
         .connect(&config.database_url)
         .await
         .expect("Failed to connect to PostgreSQL");
@@ -51,6 +51,7 @@ async fn main() {
         latest_block_height: None,
         new_mempool_txs: Vec::new(),
         all_mempool_txs: Vec::new(),
+        network_stats: None,
     }));
 
     // --- Spawn initial sync ---
@@ -72,11 +73,20 @@ async fn main() {
         indexer::zmq::listen_with_shared(&pool_poll, &rpc_poll, network, shared_poll).await;
     });
 
-    // --- Spawn mempool poller ---
-    let rpc_mempool = RpcClient::new(&config).expect("Failed to create mempool RPC client");
-    let shared_mempool = shared.clone();
+    // --- Spawn mempool poller (regtest only) ---
+    if network != Network::Bitcoin {
+        let rpc_mempool = RpcClient::new(&config).expect("Failed to create mempool RPC client");
+        let shared_mempool = shared.clone();
+        tokio::spawn(async move {
+            indexer::mempool::poll(&rpc_mempool, shared_mempool).await;
+        });
+    }
+
+    // --- Spawn network stats poller ---
+    let rpc_network = RpcClient::new(&config).expect("Failed to create network RPC client");
+    let shared_network = shared.clone();
     tokio::spawn(async move {
-        indexer::mempool::poll(&rpc_mempool, shared_mempool).await;
+        indexer::network::poll(&rpc_network, shared_network).await;
     });
 
     // --- Launch TUI ---

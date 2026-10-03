@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT to_.address, COUNT(*) as blocks,\n                MIN(b.timestamp) as first_seen,\n                MAX(b.timestamp) as last_seen\n         FROM transaction_outputs to_\n         JOIN transactions t ON to_.txid = t.txid\n         JOIN blocks b ON t.block_height = b.height\n         WHERE t.is_coinbase = true\n           AND to_.output_index = 0\n           AND to_.address IS NOT NULL\n         GROUP BY to_.address\n         HAVING COUNT(*) >= 2\n         ORDER BY blocks DESC\n         LIMIT 20",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "blocks",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "first_seen",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_seen",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "35035def1d0ac0cdd3b4f97225a955fd4b7b3b0832a5c8d1b38ecc180e4b8cc1"
+}
