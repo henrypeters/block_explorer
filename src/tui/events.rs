@@ -19,7 +19,6 @@ pub async fn handle_events(app: &mut App, pool: &PgPool) {
             if key.kind != KeyEventKind::Press {
                 return;
             }
-            // Ctrl+C always quits regardless of mode
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 app.should_quit = true;
                 return;
@@ -30,7 +29,7 @@ pub async fn handle_events(app: &mut App, pool: &PgPool) {
                 Mode::Copying => handle_copying(app, key.code),
             }
         }
-        Ok(Event::Mouse(mouse)) => handle_mouse(app, mouse),
+        Ok(Event::Mouse(mouse)) => handle_mouse(app, pool, mouse).await,
         _ => {}
     }
 }
@@ -156,7 +155,7 @@ fn handle_copying(app: &mut App, key: KeyCode) {
     }
 }
 
-fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
+async fn handle_mouse(app: &mut App, pool: &PgPool, mouse: crossterm::event::MouseEvent) {
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             if mouse.row >= SEARCH_BOX_TOP && mouse.row <= SEARCH_BOX_BOTTOM {
@@ -169,7 +168,19 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent) {
                 }
                 app.mouse_x = mouse.column;
                 app.mouse_y = mouse.row;
+
+                // Check if a pending search was set by handle_panel_click
                 app.handle_panel_click(mouse.column, mouse.row);
+
+                // Execute block click search immediately
+                if let Some(query) = app.pending_search.take() {
+                    app.searching = true;
+                    let result = search(pool, &query).await;
+                    app.searching = false;
+                    app.status = format!("Block #{}", query);
+                    app.result = Some(result);
+                    app.scroll = 0;
+                }
             }
         }
         MouseEventKind::Moved => {

@@ -30,24 +30,28 @@ pub fn render(frame: &mut Frame, app: &App) {
         .unwrap_or(false);
 
     if app.result.is_some() {
-        // Search results take full width
+        // Search results take full width on both networks
         render_results(frame, app, chunks[3]);
+    } else if !is_mainnet {
+        // Regtest — original full-width layout
+        if app.screen == crate::tui::app::Screen::Mempool {
+            render_mempool(frame, app, chunks[3]);
+        } else {
+            render_block_list(frame, app, chunks[3]);
+        }
     } else {
+        // Mainnet — split layout with mining intelligence panels
         match app.detail_screen {
             crate::tui::app::DetailScreen::None => {
-                if app.screen == crate::tui::app::Screen::Mempool {
-                    render_mempool(frame, app, chunks[3]);
-                } else {
-                    let split = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Percentage(55),
-                            Constraint::Percentage(45),
-                        ])
-                        .split(chunks[3]);
-                    render_block_list(frame, app, split[0]);
-                    render_right_panels(frame, app, split[1]);
-                }
+                let split = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(55),
+                        Constraint::Percentage(45),
+                    ])
+                    .split(chunks[3]);
+                render_block_list(frame, app, split[0]);
+                render_right_panels(frame, app, split[1]);
             }
             crate::tui::app::DetailScreen::NetworkStats => {
                 render_network_detail(frame, app, chunks[3]);
@@ -1335,9 +1339,9 @@ fn render_right_panels(frame: &mut Frame, app: &App, area: Rect) {
     let panels = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),  // Network Stats
-            Constraint::Min(6),     // Top Pools
-            Constraint::Length(8),  // Miner Performance
+            Constraint::Ratio(1, 3), // Network Stats — equal third
+            Constraint::Ratio(1, 3), // Top Pools — equal third
+            Constraint::Ratio(1, 3), // Miner Performance — equal third
         ])
         .split(area);
 
@@ -1485,6 +1489,7 @@ fn render_network_detail(frame: &mut Frame, app: &App, area: Rect) {
             let subsidy_str = format!("{:.3} BTC", subsidy);
             let adj_str = format!("{} blocks (~{} days)", stats.next_adjustment_blocks, adj_days);
             let chain_str = stats.chain.to_uppercase();
+            let avg_block_str = format!("{:.1} seconds", stats.avg_block_time_secs);
 
             let lines = vec![
                 Line::from(""),
@@ -1500,7 +1505,7 @@ fn render_network_detail(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(""),
                 stat_line("  Block Subsidy:         ", &subsidy_str, Color::Yellow),
                 stat_line("  Next Adjustment:       ", &adj_str, Color::White),
-                stat_line("  Avg Block Time:        ", &format!("{:.1} seconds", stats.avg_block_time_secs), Color::White),
+                stat_line("  Avg Block Time:        ", &avg_block_str, Color::White),
                 Line::from(""),
                 Line::from(Span::styled("  ─── Block Production ───", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
                 Line::from(""),
@@ -1688,83 +1693,6 @@ fn render_miner_detail(frame: &mut Frame, app: &App, area: Rect) {
     if total > inner.height {
         let mut state = ratatui::widgets::ScrollbarState::new(total as usize)
             .position(app.detail_scroll as usize);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            area,
-            &mut state,
-        );
-    }
-}
-
-    let inner = Rect { x: area.x + 1, y: area.y + 1, width: area.width.saturating_sub(2), height: area.height.saturating_sub(2) };
-
-    if app.miner_perfs.is_empty() {
-        frame.render_widget(
-            Paragraph::new("\n  No miner data available yet. Waiting for blocks to be indexed.").style(Style::default().fg(Color::DarkGray)),
-            inner,
-        );
-        return;
-    }
-
-    let mut lines = vec![Line::from("")];
-
-    for miner in &app.miner_perfs {
-        let status_icon = if miner.gap_hours.is_some() {
-            "⚠ GAP DETECTED"
-        } else {
-            "✔ HEALTHY"
-        };
-        let status_color = if miner.gap_hours.is_some() { Color::Yellow } else { Color::Green };
-        let border_color = Color::Green;
-
-        let w = inner.width as usize;
-        lines.push(Line::from(Span::styled(format!("  ┌{:─<width$}┐", "", width = w.saturating_sub(4)), Style::default().fg(border_color))));
-        lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(border_color)),
-            Span::styled(truncate(&miner.address, 44), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {}", status_icon), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:>width$} │", "", width = w.saturating_sub(54 + status_icon.len())), Style::default().fg(border_color)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(border_color)),
-            Span::styled("Blocks mined: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<6}", miner.blocks), Style::default().fg(Color::Cyan)),
-            Span::styled("  Est hashrate: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.2} EH/s", miner.est_hashrate_ehs), Style::default().fg(Color::Green)),
-            Span::styled(format!("{:>width$} │", "", width = w.saturating_sub(58)), Style::default().fg(border_color)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(border_color)),
-            Span::styled("Total revenue: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.3} BTC", miner.total_revenue_btc), Style::default().fg(Color::Yellow)),
-            Span::styled("  Avg interval: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.1} min", miner.avg_interval_mins), Style::default().fg(Color::White)),
-            Span::styled(format!("{:>width$} │", "", width = w.saturating_sub(60)), Style::default().fg(border_color)),
-        ]));
-
-        if let (Some(gap), Some(btc_lost)) = (miner.gap_hours, miner.est_btc_lost) {
-            lines.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(border_color)),
-                Span::styled("Gap duration: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:.1} hours", gap), Style::default().fg(Color::Yellow)),
-                Span::styled("  Est BTC lost: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:.5} BTC", btc_lost), Style::default().fg(Color::Yellow)),
-                Span::styled(format!("{:>width$} │", "", width = w.saturating_sub(60)), Style::default().fg(border_color)),
-            ]));
-        }
-
-        lines.push(Line::from(Span::styled(format!("  └{:─<width$}┘", "", width = w.saturating_sub(4)), Style::default().fg(border_color))));
-        lines.push(Line::from(""));
-    }
-
-    let total = lines.len() as u16;
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).scroll((app.detail_scroll, 0)),
-        inner,
-    );
-
-    if total > inner.height {
-        let mut state = ratatui::widgets::ScrollbarState::new(total as usize).position(app.detail_scroll as usize);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
             area,
