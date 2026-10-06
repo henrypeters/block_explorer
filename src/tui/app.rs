@@ -217,6 +217,9 @@ pub struct App {
     /// Network statistics (refreshed periodically)
     pub network_stats: Option<NetworkStats>,
 
+    /// Pending search query triggered by block card click
+    pub pending_search: Option<String>,
+
     /// Pool data for Top Pools panel
     pub pools: Vec<PoolEntry>,
 
@@ -266,6 +269,7 @@ impl App {
             mouse_x: 0,
             mouse_y: 0,
             network_stats: None,
+            pending_search: None,
             pools: Vec::new(),
             pool_miners: Vec::new(),
             miner_perfs: Vec::new(),
@@ -341,29 +345,64 @@ impl App {
     }
 
     /// Called when user clicks somewhere — opens detail screen if on a panel
-    pub fn handle_panel_click(&mut self, _col: u16, row: u16) {
+    pub fn handle_panel_click(&mut self, col: u16, row: u16) {
         if self.detail_screen != DetailScreen::None || self.result.is_some() {
             return;
         }
-        let content_start = 8u16;
-        let network_end = content_start + 8;
-        let pools_end = network_end + 14;
 
-        if row >= content_start && row < network_end {
-            self.detail_screen = DetailScreen::NetworkStats;
-            self.detail_scroll = 0;
-            self.status = "Network Stats  |  [Esc] Back".to_string();
-        } else if row >= network_end && row < pools_end {
-            if !self.pools.is_empty() {
-                self.detail_screen = DetailScreen::PoolIntelligence;
-                self.detail_scroll = 0;
-                self.status = "Pool Intelligence  |  [Esc] Back   [↑↓] Scroll".to_string();
+        // Determine if click is on left (blocks) or right (panels) side
+        // Split is 55% left / 45% right — approximate column boundary
+        let is_mainnet = self.network_stats.as_ref()
+            .map(|s| s.chain == "main")
+            .unwrap_or(false);
+
+        if !is_mainnet {
+            return;
+        }
+
+        // Rough split boundary — terminal width * 55%
+        // We don't have frame dimensions here, use a reasonable default
+        let split_col = 100u16; // approximate — most terminals are ~180+ cols on mainnet
+
+        if col < split_col {
+            // Click on left block panel — find which block card was clicked
+            // Content starts at row 8 (header 4 + search 3 + spacer 1)
+            // Each card is 5 rows + 1 gap = 6 rows
+            let content_start = 8u16;
+            if row < content_start { return; }
+
+            let relative_row = row - content_start + self.block_scroll;
+            let card_index = (relative_row / 6) as usize;
+
+            if let Some(block) = self.blocks.get(card_index) {
+                let height_str = block.height.to_string();
+                self.search_input = height_str.clone();
+                self.status = format!("Loading block #{}...", block.height);
+                // Signal that we need to search — set a pending search
+                self.pending_search = Some(height_str);
             }
-        } else if row >= pools_end {
-            if !self.miner_perfs.is_empty() {
-                self.detail_screen = DetailScreen::MinerPerformance;
+        } else {
+            // Click on right panels
+            let content_start = 8u16;
+            let network_end = content_start + 8;
+            let pools_end = network_end + 14;
+
+            if row >= content_start && row < network_end {
+                self.detail_screen = DetailScreen::NetworkStats;
                 self.detail_scroll = 0;
-                self.status = "Miner Performance  |  [Esc] Back   [↑↓] Scroll".to_string();
+                self.status = "Network Stats  |  [Esc] Back".to_string();
+            } else if row >= network_end && row < pools_end {
+                if !self.pools.is_empty() {
+                    self.detail_screen = DetailScreen::PoolIntelligence;
+                    self.detail_scroll = 0;
+                    self.status = "Pool Intelligence  |  [Esc] Back   [↑↓] Scroll".to_string();
+                }
+            } else if row >= pools_end {
+                if !self.miner_perfs.is_empty() {
+                    self.detail_screen = DetailScreen::MinerPerformance;
+                    self.detail_scroll = 0;
+                    self.status = "Miner Performance  |  [Esc] Back   [↑↓] Scroll".to_string();
+                }
             }
         }
     }
